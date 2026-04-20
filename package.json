@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "pi-plugin-rainbow",
+  "version": "0.1.0",
+  "description": "Best-effort Pi Coding Agent port of oc-plugin-rainbow.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "rainbow",
+    "terminal-ui"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "package.json",
+    "tsconfig.json"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/rainbow/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.67.68",
+    "@mariozechner/pi-tui": "^0.67.68",
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}
