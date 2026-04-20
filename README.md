@@ -2,6 +2,8 @@
 
 Best-effort Pi Coding Agent port of `oc-plugin-rainbow`.
 
+NOTE: I just realized that I my desire to create something similar to the original plugin I locked scrolling due to constant frame rendering. I will look for a solution but I do not believe it is possible due to how pi renders things.
+
 More or less useless bloat for an otherwise perfect agent. But at least it's fun bloat.
 
 This package keeps the original plugin's core UX:
