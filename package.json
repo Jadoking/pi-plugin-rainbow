@@ -5,6 +5,14 @@
   "description": "Best-effort Pi Coding Agent port of oc-plugin-rainbow.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jadoking/pi-plugin-rainbow.git"
+  },
+  "homepage": "https://github.com/Jadoking/pi-plugin-rainbow#readme",
+  "bugs": {
+    "url": "https://github.com/Jadoking/pi-plugin-rainbow/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-coding-agent",

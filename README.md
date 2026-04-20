@@ -12,6 +12,12 @@ This package keeps the original plugin's core UX:
 
 It is intentionally Pi-native instead of a 1:1 renderer port. OpenCode exposes a whole-screen TUI post-process hook; Pi does not. This package rebuilds the effect around Pi's custom editor and overlay APIs.
 
+## Install
+
+```bash
+pi install https://github.com/Jadoking/pi-plugin-rainbow.git
+```
+
 ## What It Does
 
 - replaces the default Pi editor with an animated rainbow editor
