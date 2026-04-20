@@ -2,6 +2,8 @@
 
 Best-effort Pi Coding Agent port of `oc-plugin-rainbow`.
 
+More or less useless bloat for an otherwise perfect agent. But at least it's fun bloat.
+
 This package keeps the original plugin's core UX:
 
 - animated rainbow foreground effect
