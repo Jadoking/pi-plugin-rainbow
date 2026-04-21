@@ -132,7 +132,9 @@ File:
 - `extensions/rainbow/postprocess.ts`
 
 Mode:
-- `PI_RAINBOW_POSTPROCESS_RAINBOW=1`
+- default-on in `main`
+- optional explicit enable: `PI_RAINBOW_POSTPROCESS_RAINBOW=1`
+- opt-out: `PI_RAINBOW_POSTPROCESS_RAINBOW=0`
 
 How it currently works:
 - samples the active Pi theme into RGB marks
@@ -187,7 +189,8 @@ Important result:
 - `PI_RAINBOW_POSTPROCESS_PROBE=1`
 - `PI_RAINBOW_POSTPROCESS_ROUNDTRIP=1`
 - `PI_RAINBOW_POSTPROCESS_COMPACT=1`
-- `PI_RAINBOW_POSTPROCESS_RAINBOW=1`
+- `PI_RAINBOW_POSTPROCESS_RAINBOW=1` (explicit enable)
+- `PI_RAINBOW_POSTPROCESS_RAINBOW=0` (opt-out)
 
 ### Existing runtime behavior flags/settings
 - `PI_RAINBOW_FORCE_ANIMATION=1`

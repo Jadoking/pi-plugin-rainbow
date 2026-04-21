@@ -399,7 +399,12 @@ const renderRainbowLine = (
 };
 
 export const isRainbowFramePostprocessEnabled = (env: RainbowFramePostprocessEnv = process.env) => {
-  return isTruthyFlag(env.PI_RAINBOW_POSTPROCESS_RAINBOW);
+  const flag = env.PI_RAINBOW_POSTPROCESS_RAINBOW;
+  if (flag === undefined) {
+    return true;
+  }
+
+  return isTruthyFlag(flag);
 };
 
 export const configureRainbowFramePostprocess = (

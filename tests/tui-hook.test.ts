@@ -27,7 +27,7 @@ test("applyPostprocessProbe colors the first visible line without changing visib
   assert.match(probed[1]!, /^\x1b]133;A\x07\x1b\[38;5;213m/);
 });
 
-test("tui hooks install when either debug logging or the spike flag is enabled", () => {
+test("tui hooks install by default with explicit opt-out available", () => {
   const originalEnv = {
     PI_RAINBOW_DEBUG_RENDER: process.env.PI_RAINBOW_DEBUG_RENDER,
     PI_RAINBOW_POSTPROCESS_SPIKE: process.env.PI_RAINBOW_POSTPROCESS_SPIKE,
@@ -37,6 +37,9 @@ test("tui hooks install when either debug logging or the spike flag is enabled",
   try {
     process.env.PI_RAINBOW_DEBUG_RENDER = "0";
     process.env.PI_RAINBOW_POSTPROCESS_SPIKE = "0";
+    delete process.env.PI_RAINBOW_POSTPROCESS_RAINBOW;
+    assert.equal(shouldInstallRainbowTuiHooks(), true);
+
     process.env.PI_RAINBOW_POSTPROCESS_RAINBOW = "0";
     assert.equal(shouldInstallRainbowTuiHooks(), false);
 
@@ -51,8 +54,22 @@ test("tui hooks install when either debug logging or the spike flag is enabled",
     process.env.PI_RAINBOW_POSTPROCESS_RAINBOW = "1";
     assert.equal(shouldInstallRainbowTuiHooks(), true);
   } finally {
-    process.env.PI_RAINBOW_DEBUG_RENDER = originalEnv.PI_RAINBOW_DEBUG_RENDER;
-    process.env.PI_RAINBOW_POSTPROCESS_SPIKE = originalEnv.PI_RAINBOW_POSTPROCESS_SPIKE;
-    process.env.PI_RAINBOW_POSTPROCESS_RAINBOW = originalEnv.PI_RAINBOW_POSTPROCESS_RAINBOW;
+    if (originalEnv.PI_RAINBOW_DEBUG_RENDER === undefined) {
+      delete process.env.PI_RAINBOW_DEBUG_RENDER;
+    } else {
+      process.env.PI_RAINBOW_DEBUG_RENDER = originalEnv.PI_RAINBOW_DEBUG_RENDER;
+    }
+
+    if (originalEnv.PI_RAINBOW_POSTPROCESS_SPIKE === undefined) {
+      delete process.env.PI_RAINBOW_POSTPROCESS_SPIKE;
+    } else {
+      process.env.PI_RAINBOW_POSTPROCESS_SPIKE = originalEnv.PI_RAINBOW_POSTPROCESS_SPIKE;
+    }
+
+    if (originalEnv.PI_RAINBOW_POSTPROCESS_RAINBOW === undefined) {
+      delete process.env.PI_RAINBOW_POSTPROCESS_RAINBOW;
+    } else {
+      process.env.PI_RAINBOW_POSTPROCESS_RAINBOW = originalEnv.PI_RAINBOW_POSTPROCESS_RAINBOW;
+    }
   }
 });

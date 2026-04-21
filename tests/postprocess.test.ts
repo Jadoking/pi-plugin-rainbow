@@ -33,7 +33,8 @@ const theme = {
   },
 };
 
-test("frame postprocess flag is opt-in", () => {
+test("frame postprocess flag is default-on with explicit opt-out", () => {
+  assert.equal(isRainbowFramePostprocessEnabled({}), true);
   assert.equal(isRainbowFramePostprocessEnabled({ PI_RAINBOW_POSTPROCESS_RAINBOW: "1" }), true);
   assert.equal(isRainbowFramePostprocessEnabled({ PI_RAINBOW_POSTPROCESS_RAINBOW: "false" }), false);
 });

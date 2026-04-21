@@ -109,5 +109,6 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 - Styled markdown spans such as code blocks, links, and syntax-highlighted regions are intentionally preserved instead of being recolored blindly.
 - Tool execution boxes are left at Pi defaults (no custom tool-box recoloring or animation overrides).
 - Animation is intentionally scoped to assistant text and the editor prompt entry area; tool boxes and other non-text UI regions keep Pi defaults.
+- The final-frame postprocess renderer is enabled by default. You can temporarily opt out with `PI_RAINBOW_POSTPROCESS_RAINBOW=0`.
 - When Pi runs inside tmux, the plugin uses a tmux-friendlier rendering path with much lower ANSI churn. Live animation is still reduced to static by default to avoid multiplexer redraw jitter, but you can re-enable motion with the `Animate in tmux` setting or `PI_RAINBOW_FORCE_ANIMATION=1`.
 - For distributed installs, Pi core packages are intentionally listed as peers so the plugin patches the host runtime instead of a private duplicate copy.
