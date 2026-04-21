@@ -6,11 +6,11 @@ NOTE: I just realized that I my desire to create something similar to the origin
 
 More or less useless bloat for an otherwise perfect agent. But at least it's fun bloat.
 
-This package keeps the original plugin's core UX:
+This package now leans into Pi-friendly color theming:
 
-- animated rainbow foreground effect
+- preset-driven rainbow and theme-inspired foreground palettes
+- request-progress animation that only runs while Pi is working, then settles back to the base palette
 - rainbow assistant output for plain markdown text
-- adjustable color vibrance from pastel to vivid
 - live settings UI with persistent per-user values
 - `ctrl+shift+r` splash shortcut
 
@@ -24,11 +24,15 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 
 ## What It Does
 
-- replaces the default Pi editor with an animated rainbow editor
-- decorates built-in assistant messages with cached rainbow rendering for plain text spans
+- decorates assistant output, tool call/result boxes, and request-time previews with palette animation by default
+- lets you toggle tool-box coloring and tool-box animation separately in settings
+- keeps the editor's top and bottom bars themed/animated, while typed input recoloring is optional and disabled by default until it is faster
+- decorates built-in assistant messages with cached palette rendering for plain text spans
+- ships presets based on popular palettes like Catppuccin, Dracula, Gruvbox, Nord, Tokyo Night, and more
 - persists settings under `~/.pi/agent/state/pi-plugin-rainbow.json`
 - adds `/rainbow-settings`
 - adds `/rainbow-reset`
+- adds `/rainbow-preset [list|next|prev|name]`
 - adds `/rainbow-splash`
 - adds `ctrl+shift+r`
 
@@ -36,8 +40,12 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 
 - `enabled: true`
 - `fg: true`
+- `colorInput: false`
+- `colorToolBoxes: true`
+- `animateToolBoxes: true`
 - `showStatus: false`
 - `bg: false`
+- `preset: classic-rainbow`
 - `speed: 0.008`
 - `turns: 3`
 - `vibrance: 0.35`
@@ -87,8 +95,9 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 
 ## Commands
 
-- `/rainbow-settings`: tune the effect live
+- `/rainbow-settings`: tune the active palette live
 - `/rainbow-reset`: restore defaults
+- `/rainbow-preset [list|next|prev|name]`: browse or switch presets
 - `/rainbow-splash`: show the centered splash overlay
 
 ## Notes
@@ -96,4 +105,6 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 - This package targets interactive Pi CLI, not Ralph's non-interactive `pi --print --mode json` adapter path.
 - Assistant output is patched at the component level, not via a whole-screen framebuffer hook.
 - Styled markdown spans such as code blocks, links, and syntax-highlighted regions are intentionally preserved instead of being recolored blindly.
+- Tool execution boxes keep their semantic success/error/pending base colors, then receive a darker palette-offset rainbow tint on top; pending boxes animate and completed boxes freeze.
+- Editor text recoloring is off by default because it is the slowest path; the editor's top and bottom bars still animate with the active palette, but the prompt area briefly backs off animation while you type to reduce input lag.
 - For distributed installs, Pi core packages are intentionally listed as peers so the plugin patches the host runtime instead of a private duplicate copy.

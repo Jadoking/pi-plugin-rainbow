@@ -3,12 +3,17 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { DEFAULT_VIBRANCE, normalizeVibrance } from "./motion.js";
+import { DEFAULT_PRESET_ID, normalizePresetId } from "./presets.js";
 
 export type RainbowSettings = {
   enabled: boolean;
   fg: boolean;
+  colorInput: boolean;
+  colorToolBoxes: boolean;
+  animateToolBoxes: boolean;
   showStatus: boolean;
   bg: boolean;
+  preset: string;
   speed: number;
   turns: number;
   vibrance: number;
@@ -20,8 +25,12 @@ type Listener = (value: RainbowSettings) => void;
 export const DEFAULT_SETTINGS: RainbowSettings = {
   enabled: true,
   fg: true,
+  colorInput: false,
+  colorToolBoxes: true,
+  animateToolBoxes: true,
   showStatus: false,
   bg: false,
+  preset: DEFAULT_PRESET_ID,
   speed: 0.008,
   turns: 3,
   vibrance: DEFAULT_VIBRANCE,
@@ -49,9 +58,13 @@ export const normalizeSettings = (value: Partial<RainbowSettings> | undefined): 
   return {
     enabled: boolValue(value?.enabled, DEFAULT_SETTINGS.enabled),
     fg: boolValue(value?.fg, DEFAULT_SETTINGS.fg),
+    colorInput: boolValue(value?.colorInput, DEFAULT_SETTINGS.colorInput),
+    colorToolBoxes: boolValue(value?.colorToolBoxes, DEFAULT_SETTINGS.colorToolBoxes),
+    animateToolBoxes: boolValue(value?.animateToolBoxes, DEFAULT_SETTINGS.animateToolBoxes),
     showStatus: boolValue(value?.showStatus, DEFAULT_SETTINGS.showStatus),
     // Background tinting is intentionally disabled in the Pi port.
     bg: false,
+    preset: normalizePresetId(value?.preset),
     speed: clamp(numberValue(value?.speed, DEFAULT_SETTINGS.speed), 0, 0.03),
     turns: clamp(numberValue(value?.turns, DEFAULT_SETTINGS.turns), 0.25, 8),
     vibrance: normalizeVibrance(numberValue(value?.vibrance, DEFAULT_SETTINGS.vibrance)),

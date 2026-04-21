@@ -1,15 +1,13 @@
+import { DEFAULT_PRESET_ID, getRainbowPreset, type RGB as PresetRGB } from "./presets.js";
+
 const TILT = (25 * Math.PI) / 180;
 const DX = Math.cos(TILT);
 const DY = Math.sin(TILT);
 
-export const FRAME_TICK_MS = 75;
+export const FRAME_TICK_MS = 33;
 export const DEFAULT_VIBRANCE = 0.35;
 
-export type RGB = {
-  r: number;
-  g: number;
-  b: number;
-};
+export type RGB = PresetRGB;
 
 export type RainbowMotion = {
   columnStep: number;
@@ -85,6 +83,48 @@ const rgbToHsl = (r: number, g: number, b: number) => {
   return { h: hue / 6, s: saturation, l: lightness };
 };
 
+const mixRgb = (from: RGB, to: RGB, strength: number): RGB => ({
+  r: Math.round(mix(from.r, to.r, strength)),
+  g: Math.round(mix(from.g, to.g, strength)),
+  b: Math.round(mix(from.b, to.b, strength)),
+});
+
+const normalizeHue = (value: number) => {
+  let next = value % 1;
+  if (next < 0) next += 1;
+  return next;
+};
+
+const mixHue = (from: number, to: number, strength: number) => {
+  const a = normalizeHue(from);
+  const b = normalizeHue(to);
+  let delta = b - a;
+
+  if (delta > 0.5) delta -= 1;
+  if (delta < -0.5) delta += 1;
+
+  return normalizeHue(a + delta * strength);
+};
+
+const samplePresetColor = (phase: number, presetId: string): RGB => {
+  const colors = getRainbowPreset(presetId).colors;
+  if (colors.length === 0) {
+    return { r: 255, g: 255, b: 255 };
+  }
+
+  if (colors.length === 1) {
+    return colors[0]!;
+  }
+
+  const normalizedPhase = phase - Math.floor(phase);
+  const scaled = normalizedPhase * colors.length;
+  const index = Math.floor(scaled) % colors.length;
+  const nextIndex = (index + 1) % colors.length;
+  const strength = scaled - Math.floor(scaled);
+
+  return mixRgb(colors[index]!, colors[nextIndex]!, strength);
+};
+
 export const normalizeVibrance = (value: number) => {
   return clamp(value, 0, 1);
 };
@@ -127,22 +167,51 @@ export const phaseAt = (motion: RainbowMotion, row: number, column: number) => {
   return motion.phaseShift + row * motion.rowStep + column * motion.columnStep;
 };
 
-export const getRainbowColor = (phase: number, vibrance: number): RGB => {
+export const getRainbowColor = (phase: number, presetId = DEFAULT_PRESET_ID, vibrance = DEFAULT_VIBRANCE): RGB => {
+  if (presetId !== DEFAULT_PRESET_ID) {
+    return samplePresetColor(phase, presetId);
+  }
+
   const normalizedPhase = phase - Math.floor(phase);
   const palette = getRainbowPalette(vibrance);
   return hslToRgb(normalizedPhase, palette.saturation, palette.lightness);
 };
 
-export const offsetRainbowColor = (base: RGB, phase: number, vibrance: number): RGB => {
-  const normalizedPhase = phase - Math.floor(phase);
-  const hsl = rgbToHsl(base.r, base.g, base.b);
-  const palette = getRainbowPalette(vibrance);
-  const lowSaturation = hsl.s < 0.12;
-  const hue = (lowSaturation ? normalizedPhase : hsl.h + normalizedPhase) % 1;
-  const saturationBlend = lowSaturation ? 0.5 : 0.16 + normalizeVibrance(vibrance) * 0.18;
-  const lightnessBlend = 0.12 + normalizeVibrance(vibrance) * 0.08;
-  const saturation = clamp(mix(hsl.s, palette.saturation, saturationBlend), 0.18, 0.94);
-  const lightness = clamp(mix(hsl.l, palette.lightness, lightnessBlend), 0.14, 0.92);
+export const offsetRainbowColor = (
+  base: RGB,
+  phase: number,
+  presetId = DEFAULT_PRESET_ID,
+  vibrance = DEFAULT_VIBRANCE,
+): RGB => {
+  const target = getRainbowColor(phase, presetId, vibrance);
+  const baseHsl = rgbToHsl(base.r, base.g, base.b);
+  const targetHsl = rgbToHsl(target.r, target.g, target.b);
+  const lowSaturation = baseHsl.s < 0.12;
+  const hue = lowSaturation ? targetHsl.h : mixHue(baseHsl.h, targetHsl.h, presetId === DEFAULT_PRESET_ID ? 1 : 0.35);
+  const saturationBlend = lowSaturation ? 0.5 : presetId === DEFAULT_PRESET_ID ? 0.22 + normalizeVibrance(vibrance) * 0.14 : 0.28;
+  const lightnessBlend = presetId === DEFAULT_PRESET_ID ? 0.12 + normalizeVibrance(vibrance) * 0.08 : 0.16;
+  const saturation = clamp(mix(baseHsl.s, targetHsl.s, saturationBlend), 0.18, 0.94);
+  const lightness = clamp(mix(baseHsl.l, targetHsl.l, lightnessBlend), 0.14, 0.92);
 
-  return hslToRgb(hue < 0 ? hue + 1 : hue, saturation, lightness);
+  return hslToRgb(hue, saturation, lightness);
+};
+
+export const offsetRainbowBackgroundColor = (
+  base: RGB,
+  phase: number,
+  presetId = DEFAULT_PRESET_ID,
+  vibrance = DEFAULT_VIBRANCE,
+): RGB => {
+  const target = getRainbowColor(phase, presetId, vibrance);
+  const baseHsl = rgbToHsl(base.r, base.g, base.b);
+  const targetHsl = rgbToHsl(target.r, target.g, target.b);
+  const normalizedPhase = normalizeHue(phase);
+  const bandPulse = (1 - Math.cos(normalizedPhase * Math.PI * 2)) / 2;
+  const lowSaturation = baseHsl.s < 0.12;
+  const hue = mixHue(baseHsl.h, targetHsl.h, lowSaturation ? 0.92 : presetId === DEFAULT_PRESET_ID ? 0.72 : 0.58);
+  const saturationTarget = Math.max(baseHsl.s, targetHsl.s * (0.52 + normalizeVibrance(vibrance) * 0.18));
+  const saturation = clamp(mix(baseHsl.s, saturationTarget, lowSaturation ? 0.78 : 0.48), 0.12, 0.78);
+  const lightness = clamp(baseHsl.l + 0.02 + bandPulse * (0.08 + normalizeVibrance(vibrance) * 0.03), 0.09, 0.38);
+
+  return hslToRgb(hue, saturation, lightness);
 };

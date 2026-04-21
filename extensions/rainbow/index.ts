@@ -2,6 +2,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 import { installAssistantMessagePatch } from "./assistant-patch.js";
 import { RainbowEditor } from "./editor.js";
+import { getNextRainbowPresetId, getPreviousRainbowPresetId, getRainbowPreset, findRainbowPreset, RAINBOW_PRESETS } from "./presets.js";
+import { RainbowAnimationController } from "./runtime.js";
 import { showRainbowSettingsDialog } from "./settings-dialog.js";
 import {
   DEFAULT_SETTINGS,
@@ -21,9 +23,10 @@ const formatNumber = (value: number, digits: number) => {
 
 export default function rainbowPlugin(pi: ExtensionAPI) {
   const store = new RainbowSettingsStore(DEFAULT_SETTINGS);
+  const animation = new RainbowAnimationController();
   let loadPromise: Promise<void> | undefined;
 
-  installAssistantMessagePatch(store);
+  installAssistantMessagePatch(store, animation);
 
   const ensureLoaded = async () => {
     if (!loadPromise) {
@@ -36,6 +39,8 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
   };
 
   const setStatus = (ctx: { hasUI: boolean; ui: { setStatus: (id: string, text: string | undefined) => void; theme: any } }, settings = store.get()) => {
+    const preset = getRainbowPreset(settings.preset);
+     
     if (!ctx.hasUI) return;
 
     if (!settings.showStatus) {
@@ -45,9 +50,10 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
 
     const theme = ctx.ui.theme;
     const label = settings.enabled ? theme.fg("success", "rainbow") : theme.fg("dim", "rainbow off");
+    const speed = settings.speed > 0 ? ` anim:${formatNumber(settings.speed, 3)}` : " static";
     const detail = theme.fg(
       "dim",
-      ` fg:${settings.fg ? "on" : "off"} speed:${formatNumber(settings.speed, 3)} turns:${formatNumber(settings.turns, 2)} vibrance:${formatNumber(settings.vibrance, 2)}`,
+      ` ${preset.name} fg:${settings.fg ? "on" : "off"}${speed} bands:${formatNumber(settings.turns, 2)}`,
     );
     ctx.ui.setStatus(STATUS_ID, `${label}${detail}`);
   };
@@ -70,10 +76,22 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
     }
 
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      return new RainbowEditor(tui, theme, keybindings, store);
+      return new RainbowEditor(tui, theme, keybindings, store, animation);
     });
 
     setStatus(ctx);
+  });
+
+  pi.on("before_agent_start", async () => {
+    animation.start();
+  });
+
+  pi.on("agent_end", async () => {
+    animation.stop(store.get().speed);
+  });
+
+  pi.on("session_shutdown", async () => {
+    animation.reset();
   });
 
   pi.registerCommand("rainbow-settings", {
@@ -98,6 +116,43 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
       await ensureLoaded();
       applySettings(ctx, { ...DEFAULT_SETTINGS });
       ctx.ui.notify("Rainbow settings reset to defaults", "info");
+    },
+  });
+
+  pi.registerCommand("rainbow-preset", {
+    description: "List, select, or rotate rainbow palette presets",
+    handler: async (args, ctx) => {
+      await ensureLoaded();
+
+      const query = args.trim();
+      if (!query || query === "list") {
+        const presetList = RAINBOW_PRESETS.map((preset) => preset.id).join(", ");
+        ctx.ui.notify(`Rainbow presets: ${presetList}`, "info");
+        return;
+      }
+
+      const current = store.get();
+      let nextPresetId: string | undefined;
+
+      if (query === "next") {
+        nextPresetId = getNextRainbowPresetId(current.preset);
+      } else if (query === "prev" || query === "previous") {
+        nextPresetId = getPreviousRainbowPresetId(current.preset);
+      } else {
+        nextPresetId = findRainbowPreset(query)?.id;
+      }
+
+      if (!nextPresetId) {
+        ctx.ui.notify(`Unknown rainbow preset "${query}". Try /rainbow-preset list`, "error");
+        return;
+      }
+
+      applySettings(ctx, {
+        ...current,
+        preset: nextPresetId,
+      });
+
+      ctx.ui.notify(`Rainbow preset set to ${getRainbowPreset(nextPresetId).name}`, "info");
     },
   });
 

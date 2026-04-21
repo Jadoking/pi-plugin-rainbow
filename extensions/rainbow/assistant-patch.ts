@@ -1,4 +1,4 @@
-import { AssistantMessageComponent, UserMessageComponent } from "@mariozechner/pi-coding-agent";
+import { AssistantMessageComponent, ToolExecutionComponent, UserMessageComponent } from "@mariozechner/pi-coding-agent";
 import { Markdown, visibleWidth } from "@mariozechner/pi-tui";
 
 import {
@@ -7,11 +7,14 @@ import {
   frameBucketToElapsedMs,
   getFrameBucket,
   getRainbowColor,
+  offsetRainbowBackgroundColor,
   offsetRainbowColor,
   phaseAt,
   type RGB,
   type RainbowMotion,
 } from "./motion.js";
+import { DEFAULT_PRESET_ID } from "./presets.js";
+import type { RainbowAnimationController } from "./runtime.js";
 import type { RainbowSettingsStore } from "./settings.js";
 
 type AssistantContent =
@@ -26,14 +29,6 @@ type AssistantMessageLike = {
   timestamp: number;
 };
 
-type AssistantContentContainer = {
-  children: unknown[];
-};
-
-type AssistantComponentInternals = {
-  contentContainer: AssistantContentContainer;
-};
-
 type MarkdownInternals = {
   defaultTextStyle?: unknown;
   paddingX: number;
@@ -45,6 +40,21 @@ type MarkdownInternals = {
 
 type AssistantMotionState = {
   phaseSeed: number;
+  renderOrder?: number;
+  cachedBaseLines?: string[];
+  cachedFrame?: number;
+  cachedKey?: string;
+  cachedLines?: string[];
+};
+
+type ToolRenderState = {
+  phaseSeed: number;
+  renderOrder?: number;
+  frozenFrame?: number;
+  cachedBaseLines?: string[];
+  cachedFrame?: number;
+  cachedKey?: string;
+  cachedLines?: string[];
 };
 
 type UserMessageInternals = {
@@ -55,8 +65,15 @@ type UserMessageInternals = {
 
 type PatchState = {
   getSettings: () => ReturnType<RainbowSettingsStore["get"]>;
+  getElapsedMs: () => number;
+  assistantOrderCounter: number;
+  latestAssistantOrder: number;
+  toolOrderCounter: number;
+  latestToolOrder: number;
   installed: boolean;
   originalUpdateContent?: (this: AssistantMessageComponent, message: AssistantMessageLike) => void;
+  originalAssistantRender?: (this: AssistantMessageComponent, width: number) => string[];
+  originalToolRender?: (this: ToolExecutionComponent, width: number) => string[];
   originalUserRender?: (this: UserMessageComponent, width: number) => string[];
 };
 
@@ -64,6 +81,7 @@ const RESET = "\x1b[0m";
 const ANSI_SGR_RESET = /^\x1b\[(?:0(?:;0)*)?m$/;
 const PATCH_STATE_KEY = Symbol.for("pi-plugin-rainbow.assistantPatchState");
 const MOTION_STATE_KEY = Symbol.for("pi-plugin-rainbow.assistantMotionState");
+const TOOL_RENDER_STATE_KEY = Symbol.for("pi-plugin-rainbow.toolRenderState");
 const USER_RENDER_STATE_KEY = Symbol.for("pi-plugin-rainbow.userRenderState");
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -74,6 +92,12 @@ const LINE_PARSE_CACHE_LIMIT = 800;
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const parsedLineCache = new Map<string, ParsedLine>();
+
+const haveSameLines = (previous: string[] | undefined, next: string[]) => {
+  return !!previous
+    && previous.length === next.length
+    && previous.every((line, index) => line === next[index]);
+};
 
 type UserRenderState = {
   phaseSeed: number;
@@ -105,7 +129,12 @@ const getPatchState = () => {
 
   if (!scopedGlobal[PATCH_STATE_KEY]) {
     scopedGlobal[PATCH_STATE_KEY] = {
-      getSettings: () => ({ enabled: true, fg: true, showStatus: false, bg: false, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
+      getSettings: () => ({ enabled: true, fg: true, colorInput: false, colorToolBoxes: true, animateToolBoxes: true, showStatus: false, bg: false, preset: DEFAULT_PRESET_ID, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
+      getElapsedMs: () => 0,
+      assistantOrderCounter: 0,
+      latestAssistantOrder: 0,
+      toolOrderCounter: 0,
+      latestToolOrder: 0,
       installed: false,
     };
   }
@@ -121,10 +150,81 @@ const getMotionState = (component: object, message: AssistantMessageLike) => {
   if (!scopedComponent[MOTION_STATE_KEY]) {
     scopedComponent[MOTION_STATE_KEY] = {
       phaseSeed: ((message.timestamp % 997) + 997) / 997,
+      cachedFrame: Number.NaN,
     };
   }
 
   return scopedComponent[MOTION_STATE_KEY]!;
+};
+
+const getToolRenderState = (component: object, seed: string) => {
+  const scopedComponent = component as typeof component & {
+    [TOOL_RENDER_STATE_KEY]?: ToolRenderState;
+  };
+
+  if (!scopedComponent[TOOL_RENDER_STATE_KEY]) {
+    scopedComponent[TOOL_RENDER_STATE_KEY] = {
+      phaseSeed: (hashString(seed) % 997) / 997,
+      cachedFrame: Number.NaN,
+    };
+  }
+
+  return scopedComponent[TOOL_RENDER_STATE_KEY]!;
+};
+
+export const getAssistantAnimationFrame = (
+  motion: Pick<AssistantMotionState, "renderOrder">,
+  latestAssistantOrder: number,
+  speed: number,
+  elapsedMs: number,
+) => {
+  const isLatest = motion.renderOrder !== undefined && motion.renderOrder === latestAssistantOrder;
+  const animatedElapsedMs = speed > 0 && isLatest ? elapsedMs : 0;
+
+  return {
+    isLatest,
+    elapsedMs: animatedElapsedMs,
+    frame: speed > 0 && isLatest ? getFrameBucket(animatedElapsedMs) : 0,
+  };
+};
+
+export const getToolAnimationFrame = (
+  motion: Pick<ToolRenderState, "renderOrder" | "frozenFrame">,
+  latestToolOrder: number,
+  speed: number,
+  elapsedMs: number,
+  animateToolBoxes: boolean,
+  isPending: boolean,
+) => {
+  const isLatest = motion.renderOrder !== undefined && motion.renderOrder === latestToolOrder;
+
+  if (!animateToolBoxes || speed <= 0) {
+    const frame = motion.frozenFrame ?? 0;
+    return {
+      isLatest,
+      elapsedMs: 0,
+      frame,
+      nextFrozenFrame: frame,
+    };
+  }
+
+  if (isPending && isLatest) {
+    const frame = getFrameBucket(elapsedMs);
+    return {
+      isLatest,
+      elapsedMs,
+      frame,
+      nextFrozenFrame: frame,
+    };
+  }
+
+  const frame = motion.frozenFrame ?? 0;
+  return {
+    isLatest,
+    elapsedMs: 0,
+    frame,
+    nextFrozenFrame: frame,
+  };
 };
 
 const isMarkdownLike = (value: unknown): value is MarkdownInternals => {
@@ -172,6 +272,10 @@ const readEscapeSequence = (line: string, index: number) => {
 
 const fgCode = (r: number, g: number, b: number) => {
   return `\x1b[38;2;${r};${g};${b}m`;
+};
+
+const bgCode = (r: number, g: number, b: number) => {
+  return `\x1b[48;2;${r};${g};${b}m`;
 };
 
 const clamp = (value: number, min: number, max: number) => {
@@ -228,7 +332,7 @@ export const colorCodeToRgb = (colorCode: string | null): RGB | null => {
     return null;
   }
 
-  if (colorCode.startsWith("38;2;")) {
+  if (colorCode.startsWith("38;2;") || colorCode.startsWith("48;2;")) {
     const parts = colorCode.split(";").slice(2).map((part) => Number.parseInt(part, 10));
     if (parts.length === 3 && parts.every((part) => Number.isFinite(part))) {
       return {
@@ -241,7 +345,7 @@ export const colorCodeToRgb = (colorCode: string | null): RGB | null => {
     return null;
   }
 
-  if (colorCode.startsWith("38;5;")) {
+  if (colorCode.startsWith("38;5;") || colorCode.startsWith("48;5;")) {
     const index = Number.parseInt(colorCode.split(";")[2] ?? "", 10);
     return Number.isFinite(index) ? ansi256ToRgb(index) : null;
   }
@@ -259,10 +363,18 @@ export const colorCodeToRgb = (colorCode: string | null): RGB | null => {
     return BASIC_ANSI_COLORS[basic - 82]!;
   }
 
+  if (basic >= 40 && basic <= 47) {
+    return BASIC_ANSI_COLORS[basic - 40]!;
+  }
+
+  if (basic >= 100 && basic <= 107) {
+    return BASIC_ANSI_COLORS[basic - 92]!;
+  }
+
   return null;
 };
 
-export const updateForegroundColorCode = (current: string | null, sequence: string) => {
+const updateTrackedColorCode = (current: string | null, sequence: string, target: "fg" | "bg") => {
   if (!sequence.endsWith("m")) {
     return current;
   }
@@ -279,6 +391,11 @@ export const updateForegroundColorCode = (current: string | null, sequence: stri
 
   const parts = params.split(";");
   let next = current;
+  const extendedCode = target === "fg" ? 38 : 48;
+  const resetCode = target === "fg" ? 39 : 49;
+  const basicStart = target === "fg" ? 30 : 40;
+  const brightStart = target === "fg" ? 90 : 100;
+  const brightEnd = brightStart + 7;
 
   for (let index = 0; index < parts.length; ) {
     const code = Number.parseInt(parts[index] ?? "", 10);
@@ -293,21 +410,21 @@ export const updateForegroundColorCode = (current: string | null, sequence: stri
       continue;
     }
 
-    if (code === 38) {
+    if (code === extendedCode) {
       if (parts[index + 1] === "5" && parts[index + 2] !== undefined) {
-        next = `38;5;${parts[index + 2]}`;
+        next = `${extendedCode};5;${parts[index + 2]}`;
         index += 3;
         continue;
       }
 
       if (parts[index + 1] === "2" && parts[index + 4] !== undefined) {
-        next = `38;2;${parts[index + 2]};${parts[index + 3]};${parts[index + 4]}`;
+        next = `${extendedCode};2;${parts[index + 2]};${parts[index + 3]};${parts[index + 4]}`;
         index += 5;
         continue;
       }
     }
 
-    if (code === 48) {
+    if (code === 38 || code === 48) {
       if (parts[index + 1] === "5" && parts[index + 2] !== undefined) {
         index += 3;
         continue;
@@ -319,13 +436,13 @@ export const updateForegroundColorCode = (current: string | null, sequence: stri
       }
     }
 
-    if (code === 39) {
+    if (code === resetCode) {
       next = null;
       index += 1;
       continue;
     }
 
-    if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+    if ((code >= basicStart && code <= basicStart + 7) || (code >= brightStart && code <= brightEnd)) {
       next = String(code);
     }
 
@@ -333,6 +450,14 @@ export const updateForegroundColorCode = (current: string | null, sequence: stri
   }
 
   return next;
+};
+
+export const updateForegroundColorCode = (current: string | null, sequence: string) => {
+  return updateTrackedColorCode(current, sequence, "fg");
+};
+
+export const updateBackgroundColorCode = (current: string | null, sequence: string) => {
+  return updateTrackedColorCode(current, sequence, "bg");
 };
 
 export const getParsedRainbowLine = (line: string): ParsedLine => {
@@ -418,7 +543,13 @@ const getUserRenderState = (component: object, seed: string) => {
   return scopedComponent[USER_RENDER_STATE_KEY]!;
 };
 
-const colorizePlainTextLine = (line: string, row: number, motion: RainbowMotion, vibrance: number) => {
+const colorizePlainTextLine = (
+  line: string,
+  row: number,
+  motion: RainbowMotion,
+  preset: string,
+  vibrance: number,
+) => {
   const parsedLine = getParsedRainbowLine(line);
   let result = "";
   let column = 0;
@@ -437,7 +568,9 @@ const colorizePlainTextLine = (line: string, row: number, motion: RainbowMotion,
     }
 
     const phase = phaseAt(motion, row, column);
-    const color = token.explicitFg ? offsetRainbowColor(token.explicitFg, phase, vibrance) : getRainbowColor(phase, vibrance);
+    const color = token.explicitFg
+      ? offsetRainbowColor(token.explicitFg, phase, preset, vibrance)
+      : getRainbowColor(phase, preset, vibrance);
     result += `${fgCode(color.r, color.g, color.b)}${token.value}${token.restoreFgAnsi}`;
     changed = true;
     column += token.width;
@@ -450,6 +583,7 @@ const colorizeBorderOnlyLine = (
   line: string,
   row: number,
   motion: RainbowMotion,
+  preset: string,
   vibrance: number,
 ) => {
   let activeAnsi = RESET;
@@ -489,7 +623,7 @@ const colorizeBorderOnlyLine = (
 
     if (USER_BORDER_CHARS.test(char)) {
       const phase = phaseAt(motion, row, column);
-      const fg = getRainbowColor(phase, vibrance);
+      const fg = getRainbowColor(phase, preset, vibrance);
       result += `${fgCode(fg.r, fg.g, fg.b)}${char}${activeAnsi}`;
       changed = true;
     } else {
@@ -498,6 +632,73 @@ const colorizeBorderOnlyLine = (
 
     column += charWidth;
     index += char.length;
+  }
+
+  return changed ? `${result}${RESET}` : line;
+};
+
+export const colorizeToolBoxLine = (
+  line: string,
+  row: number,
+  motion: RainbowMotion,
+  preset: string,
+  vibrance: number,
+) => {
+  let activeAnsi = RESET;
+  let currentBgCode: string | null = null;
+  let currentBgRgb: RGB | null = null;
+  let result = "";
+  let column = 0;
+  let changed = false;
+
+  for (let index = 0; index < line.length; ) {
+    if (line.charCodeAt(index) === 0x1b) {
+      const sequence = readEscapeSequence(line, index);
+      if (sequence) {
+        result += sequence;
+
+        if (sequence.endsWith("m")) {
+          activeAnsi = ANSI_SGR_RESET.test(sequence)
+            ? RESET
+            : activeAnsi === RESET
+              ? sequence
+              : `${activeAnsi}${sequence}`;
+          currentBgCode = updateBackgroundColorCode(currentBgCode, sequence);
+          currentBgRgb = colorCodeToRgb(currentBgCode);
+        }
+
+        index += sequence.length;
+        continue;
+      }
+    }
+
+    let nextEscape = index;
+    while (nextEscape < line.length && line.charCodeAt(nextEscape) !== 0x1b) {
+      nextEscape += 1;
+    }
+
+    const chunk = line.slice(index, nextEscape);
+    for (const { segment } of segmenter.segment(chunk)) {
+      const width = visibleWidth(segment);
+      if (width === 0) {
+        result += segment;
+        continue;
+      }
+
+      if (!currentBgRgb) {
+        result += segment;
+        column += width;
+        continue;
+      }
+
+      const phase = phaseAt(motion, row, column);
+      const bg = offsetRainbowBackgroundColor(currentBgRgb, phase, preset, vibrance);
+      result += `${bgCode(bg.r, bg.g, bg.b)}${segment}${activeAnsi}`;
+      changed = true;
+      column += width;
+    }
+
+    index = nextEscape;
   }
 
   return changed ? `${result}${RESET}` : line;
@@ -521,6 +722,7 @@ const renderRainbowPromptOutline = (
   phaseSeed: number,
   speed: number,
   turns: number,
+  preset: string,
   vibrance: number,
 ) => {
   if (width < 4) {
@@ -539,73 +741,18 @@ const renderRainbowPromptOutline = (
     ...contentLines.map((line) => `│ ${line} │`),
     `│ ${emptyContent} │`,
     `╰${"─".repeat(horizontalWidth)}╯`,
-  ].map((line, row) => colorizeBorderOnlyLine(line, row, motion, vibrance));
+  ].map((line, row) => colorizeBorderOnlyLine(line, row, motion, preset, vibrance));
 
   return withOscMarkers(lines);
 };
 
-class RainbowAssistantMarkdown extends Markdown {
-  private rainbowCachedBaseLines?: string[];
-  private rainbowCachedFrame = Number.NaN;
-  private rainbowCachedKey?: string;
-  private rainbowCachedLines?: string[];
-
-  constructor(
-    text: string,
-    paddingX: number,
-    paddingY: number,
-    theme: ConstructorParameters<typeof Markdown>[3],
-    private readonly motion: AssistantMotionState,
-  ) {
-    super(text, paddingX, paddingY, theme);
-  }
-
-  override invalidate() {
-    super.invalidate();
-    this.rainbowCachedBaseLines = undefined;
-    this.rainbowCachedFrame = Number.NaN;
-    this.rainbowCachedKey = undefined;
-    this.rainbowCachedLines = undefined;
-  }
-
-  override render(width: number) {
-    const baseLines = super.render(width);
-    const settings = getPatchState().getSettings();
-
-    if (!settings.enabled || !settings.fg) {
-      this.rainbowCachedBaseLines = baseLines;
-      this.rainbowCachedFrame = Number.NaN;
-      this.rainbowCachedKey = undefined;
-      this.rainbowCachedLines = undefined;
-      return baseLines;
-    }
-
-    const frame = getFrameBucket(Date.now());
-    const key = `${settings.turns}:${settings.speed}:${settings.vibrance}:${this.motion.phaseSeed}:${frame}`;
-
-    if (
-      this.rainbowCachedLines &&
-      this.rainbowCachedBaseLines === baseLines &&
-      this.rainbowCachedFrame === frame &&
-      this.rainbowCachedKey === key
-    ) {
-      return this.rainbowCachedLines;
-    }
-
-    const motion = createRainbowMotion(width, baseLines.length, settings.turns, frameBucketToElapsedMs(frame), settings.speed, this.motion.phaseSeed);
-    const lines = baseLines.map((line, row) => colorizePlainTextLine(line, row, motion, settings.vibrance));
-
-    this.rainbowCachedBaseLines = baseLines;
-    this.rainbowCachedFrame = frame;
-    this.rainbowCachedKey = key;
-    this.rainbowCachedLines = lines;
-    return lines;
-  }
-}
-
-export const installAssistantMessagePatch = (store: RainbowSettingsStore) => {
+export const installAssistantMessagePatch = (
+  store: RainbowSettingsStore,
+  animation: RainbowAnimationController,
+) => {
   const patchState = getPatchState();
   patchState.getSettings = () => store.get();
+  patchState.getElapsedMs = () => animation.getElapsedMs();
 
   if (patchState.installed) {
     return;
@@ -616,45 +763,135 @@ export const installAssistantMessagePatch = (store: RainbowSettingsStore) => {
     throw new Error("AssistantMessageComponent.updateContent is unavailable");
   }
 
+  const originalAssistantRender = AssistantMessageComponent.prototype.render as PatchState["originalAssistantRender"];
+  if (!originalAssistantRender) {
+    throw new Error("AssistantMessageComponent.render is unavailable");
+  }
+
+  const originalToolRender = ToolExecutionComponent.prototype.render as PatchState["originalToolRender"];
+  if (!originalToolRender) {
+    throw new Error("ToolExecutionComponent.render is unavailable");
+  }
+
   const originalUserRender = UserMessageComponent.prototype.render as PatchState["originalUserRender"];
   if (!originalUserRender) {
     throw new Error("UserMessageComponent.render is unavailable");
   }
 
   patchState.originalUpdateContent = originalUpdateContent;
+  patchState.originalAssistantRender = originalAssistantRender;
+  patchState.originalToolRender = originalToolRender;
   patchState.originalUserRender = originalUserRender;
 
   AssistantMessageComponent.prototype.updateContent = function patchedUpdateContent(message: AssistantMessageLike) {
     originalUpdateContent.call(this, message);
-
-    const component = this as unknown as AssistantComponentInternals;
-    const contentContainer = component.contentContainer;
-    if (!contentContainer) {
-      return;
-    }
-
     const motion = getMotionState(this, message);
-
-    for (let index = 0; index < contentContainer.children.length; index += 1) {
-      const child = contentContainer.children[index];
-      if (!isMarkdownLike(child) || child instanceof RainbowAssistantMarkdown) {
-        continue;
-      }
-
-      const markdownChild = child;
-
-      if (markdownChild.defaultTextStyle !== undefined) {
-        continue;
-      }
-
-      contentContainer.children[index] = new RainbowAssistantMarkdown(
-        markdownChild.text,
-        markdownChild.paddingX,
-        markdownChild.paddingY,
-        markdownChild.theme,
-        motion,
-      );
+    if (motion.renderOrder === undefined) {
+      motion.renderOrder = ++patchState.assistantOrderCounter;
     }
+    if (motion.renderOrder > patchState.latestAssistantOrder) {
+      patchState.latestAssistantOrder = motion.renderOrder;
+    }
+    motion.cachedBaseLines = undefined;
+    motion.cachedFrame = Number.NaN;
+    motion.cachedKey = undefined;
+    motion.cachedLines = undefined;
+  };
+
+  AssistantMessageComponent.prototype.render = function patchedAssistantRender(width: number) {
+    const settings = patchState.getSettings();
+    const baseLines = originalAssistantRender.call(this, width);
+
+    if (!settings.enabled || !settings.fg) {
+      return baseLines;
+    }
+
+    const motion = (this as typeof this & { [MOTION_STATE_KEY]?: AssistantMotionState })[MOTION_STATE_KEY];
+    if (!motion) {
+      return baseLines;
+    }
+
+    const animation = getAssistantAnimationFrame(
+      motion,
+      patchState.latestAssistantOrder,
+      settings.speed,
+      getPatchState().getElapsedMs(),
+    );
+    const frame = animation.frame;
+    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${motion.phaseSeed}:${motion.renderOrder === patchState.latestAssistantOrder ? 1 : 0}:${frame}:${width}`;
+
+    if (motion.cachedLines && haveSameLines(motion.cachedBaseLines, baseLines) && motion.cachedFrame === frame && motion.cachedKey === key) {
+      return motion.cachedLines;
+    }
+
+    const rainbowMotion = createRainbowMotion(
+      width,
+      baseLines.length,
+      settings.turns,
+      frameBucketToElapsedMs(animation.frame),
+      settings.speed,
+      motion.phaseSeed,
+    );
+    const lines = baseLines.map((line, row) => colorizePlainTextLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
+
+    motion.cachedBaseLines = [...baseLines];
+    motion.cachedFrame = frame;
+    motion.cachedKey = key;
+    motion.cachedLines = lines;
+    return lines;
+  };
+
+  ToolExecutionComponent.prototype.render = function patchedToolRender(width: number) {
+    const settings = patchState.getSettings();
+    const baseLines = originalToolRender.call(this, width);
+
+    if (!settings.enabled || !settings.fg || !settings.colorToolBoxes || baseLines.length === 0) {
+      return baseLines;
+    }
+
+    const component = this as unknown as { toolCallId?: string; toolName?: string; isPartial?: boolean };
+    const seed = component.toolCallId ?? component.toolName ?? `tool:${width}`;
+    const renderState = getToolRenderState(this, seed);
+    const isPending = component.isPartial !== false;
+
+    if (renderState.renderOrder === undefined) {
+      renderState.renderOrder = ++patchState.toolOrderCounter;
+    }
+    if (renderState.renderOrder > patchState.latestToolOrder) {
+      patchState.latestToolOrder = renderState.renderOrder;
+    }
+
+    const animation = getToolAnimationFrame(
+      renderState,
+      patchState.latestToolOrder,
+      settings.speed,
+      getPatchState().getElapsedMs(),
+      settings.animateToolBoxes,
+      isPending,
+    );
+    renderState.frozenFrame = animation.nextFrozenFrame;
+    const frame = animation.frame;
+    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${settings.animateToolBoxes ? 1 : 0}:${isPending ? 1 : 0}:${renderState.phaseSeed}:${renderState.renderOrder === patchState.latestToolOrder ? 1 : 0}:${frame}:${width}`;
+
+    if (renderState.cachedLines && haveSameLines(renderState.cachedBaseLines, baseLines) && renderState.cachedFrame === frame && renderState.cachedKey === key) {
+      return renderState.cachedLines;
+    }
+
+    const rainbowMotion = createRainbowMotion(
+      width,
+      baseLines.length,
+      settings.turns,
+      frameBucketToElapsedMs(animation.frame),
+      settings.speed,
+      renderState.phaseSeed,
+    );
+    const lines = baseLines.map((line, row) => colorizeToolBoxLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
+
+    renderState.cachedBaseLines = [...baseLines];
+    renderState.cachedFrame = frame;
+    renderState.cachedKey = key;
+    renderState.cachedLines = lines;
+    return lines;
   };
 
   UserMessageComponent.prototype.render = function patchedUserRender(width: number) {
@@ -673,14 +910,23 @@ export const installAssistantMessagePatch = (store: RainbowSettingsStore) => {
 
     const signature = `${width}\n${markdown.text}`;
     const renderState = getUserRenderState(this, signature);
-    const frame = getFrameBucket(Date.now());
-    const key = `${settings.turns}:${settings.speed}:${settings.vibrance}:${frame}:${signature}`;
+    const frame = settings.speed > 0 ? getFrameBucket(getPatchState().getElapsedMs()) : 0;
+    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${frame}:${signature}`;
 
     if (renderState.cachedLines && renderState.cachedKey === key) {
       return renderState.cachedLines;
     }
 
-    const lines = renderRainbowPromptOutline(markdown, width, frame, renderState.phaseSeed, settings.speed, settings.turns, settings.vibrance);
+    const lines = renderRainbowPromptOutline(
+      markdown,
+      width,
+      frame,
+      renderState.phaseSeed,
+      settings.speed,
+      settings.turns,
+      settings.preset,
+      settings.vibrance,
+    );
     renderState.cachedKey = key;
     renderState.cachedLines = lines;
     return lines;

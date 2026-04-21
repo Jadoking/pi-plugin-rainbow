@@ -41,13 +41,14 @@ const center = (text: string, width: number) => {
 const colorize = (text: string, elapsedMs: number, row: number, settings: RainbowSettings) => {
   const chars = Array.from(text);
   const flash = elapsedMs < 1100 ? 1 - elapsedMs / 1100 : 0;
-  const motion = createRainbowMotion(chars.length, LOGO.length, settings.turns, elapsedMs, settings.speed);
+  const motionElapsedMs = settings.speed > 0 ? elapsedMs : 0;
+  const motion = createRainbowMotion(chars.length, LOGO.length, settings.turns, motionElapsedMs, settings.speed);
 
   return chars
     .map((char, index) => {
       if (char === " ") return char;
       const phase = phaseAt(motion, row, index);
-      const base = getRainbowColor(phase, settings.vibrance);
+      const base = getRainbowColor(phase, settings.preset, settings.vibrance);
       const r = mix(base.r, 255, flash * SPLASH_FLASH_STRENGTH);
       const g = mix(base.g, 255, flash * SPLASH_FLASH_STRENGTH);
       const b = mix(base.b, 255, flash * SPLASH_FLASH_STRENGTH);

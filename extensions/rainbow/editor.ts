@@ -7,6 +7,7 @@ import {
   phaseAt,
   type RainbowMotion,
 } from "./motion.js";
+import type { RainbowAnimationController } from "./runtime.js";
 import type { RainbowSettings, RainbowSettingsStore } from "./settings.js";
 
 const RESET = "\x1b[0m";
@@ -18,19 +19,55 @@ const clamp = (value: number, min: number, max: number) => {
   return value;
 };
 
-const frameMs = (settings: RainbowSettings) => {
-  const minFps = 12;
-  const maxFps = 24;
-  const phaseStep = 0.05;
-  const phaseRate = settings.speed * (settings.fg ? 0.1 : 0.04);
+const EDITOR_INPUT_SETTLE_MS = 180;
+const INPUT_FRAME_DELAY_MULTIPLIER = 2;
 
-  if (phaseRate <= 0) return 1000 / minFps;
-
-  return clamp(phaseStep / phaseRate, 1000 / maxFps, 1000 / minFps);
+export const isEditorInputSettling = (lastInputAtMs: number, nowMs: number) => {
+  return nowMs - lastInputAtMs < EDITOR_INPUT_SETTLE_MS;
 };
 
-const shouldAnimate = (settings: RainbowSettings) => {
+export const getEditorAnimationDelayMs = (settings: RainbowSettings, inputSettling = false) => {
+  const minFps = 20;
+  const maxFps = 30;
+  const phaseStep = 0.03;
+  const phaseRate = settings.speed * (settings.fg ? 0.1 : 0.04);
+
+  const baseDelay = phaseRate <= 0
+    ? 1000 / minFps
+    : clamp(phaseStep / phaseRate, 1000 / maxFps, 1000 / minFps);
+
+  return inputSettling ? baseDelay * INPUT_FRAME_DELAY_MULTIPLIER : baseDelay;
+};
+
+const shouldDecorateEditor = (settings: RainbowSettings) => {
   return settings.enabled && settings.fg;
+};
+
+const stripAnsi = (value: string) => {
+  return value
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
+};
+
+export const isEditorChromeLine = (line: string) => {
+  const plain = stripAnsi(line).trimEnd();
+  return /^─+$/.test(plain) || /^─── [↑↓] \d+ more(?: ─+)?$/.test(plain);
+};
+
+export const getEditorLineColorMode = (line: string, settings: RainbowSettings): "all" | "none" => {
+  if (!shouldDecorateEditor(settings)) {
+    return "none";
+  }
+
+  if (isEditorChromeLine(line)) {
+    return "all";
+  }
+
+  return settings.colorInput ? "all" : "none";
+};
+
+const shouldAnimate = (settings: RainbowSettings, animation: RainbowAnimationController) => {
+  return shouldDecorateEditor(settings) && settings.speed > 0 && animation.isAnimating();
 };
 
 const readEscapeSequence = (line: string, index: number) => {
@@ -70,12 +107,22 @@ const fgCode = (r: number, g: number, b: number) => {
   return `\x1b[38;2;${r};${g};${b}m`;
 };
 
+const haveSameLines = (previous: string[] | undefined, next: string[]) => {
+  return !!previous
+    && previous.length === next.length
+    && previous.every((line, index) => line === next[index]);
+};
+
 const applyRainbowToLine = (
   line: string,
   row: number,
   motion: RainbowMotion,
   settings: RainbowSettings,
 ) => {
+  if (getEditorLineColorMode(line, settings) === "none") {
+    return line;
+  }
+
   let activeAnsi = RESET;
   let result = "";
   let column = 0;
@@ -112,7 +159,7 @@ const applyRainbowToLine = (
     }
 
     const phase = phaseAt(motion, row, column);
-    const fg = getRainbowColor(phase, settings.vibrance);
+    const fg = getRainbowColor(phase, settings.preset, settings.vibrance);
     let codes = "";
 
     if (settings.fg && char !== " " && char !== "\t") {
@@ -134,49 +181,96 @@ const applyRainbowToLine = (
 };
 
 export class RainbowEditor extends CustomEditor {
-  private readonly startedAt = Date.now();
-  private readonly unsubscribe: () => void;
+  private readonly unsubscribers: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | undefined;
   private timerDelay = -1;
+  private lastInputAtMs = Number.NEGATIVE_INFINITY;
+  private frozenChromeFrame = 0;
+  private cachedBaseLines?: string[];
+  private cachedRenderKey?: string;
+  private cachedLines?: string[];
 
-  constructor(tui: any, theme: any, keybindings: any, private readonly store: RainbowSettingsStore) {
+  constructor(
+    tui: any,
+    theme: any,
+    keybindings: any,
+    private readonly store: RainbowSettingsStore,
+    private readonly animation: RainbowAnimationController,
+  ) {
     super(tui, theme, keybindings);
 
-    this.unsubscribe = store.subscribe(() => {
-      this.syncAnimation();
-      this.tui.requestRender();
-    });
+    this.unsubscribers.push(
+      store.subscribe(() => {
+        this.syncAnimation();
+        this.tui.requestRender();
+      }),
+      animation.subscribe(() => {
+        this.syncAnimation();
+        this.tui.requestRender();
+      }),
+    );
 
     this.syncAnimation();
   }
 
   dispose() {
     this.stopAnimation();
-    this.unsubscribe();
+    for (const unsubscribe of this.unsubscribers) {
+      unsubscribe();
+    }
+  }
+
+  override handleInput(data: string): void {
+    this.lastInputAtMs = Date.now();
+    super.handleInput(data);
+    this.syncAnimation();
   }
 
   render(width: number) {
     const lines = super.render(width);
     const settings = this.store.get();
 
-    if (!shouldAnimate(settings)) {
+    if (!shouldDecorateEditor(settings)) {
+      this.cachedBaseLines = undefined;
+      this.cachedRenderKey = undefined;
+      this.cachedLines = undefined;
       return lines;
     }
 
-    const elapsedMs = Date.now() - this.startedAt;
-    const motion = createRainbowMotion(width, lines.length, settings.turns, elapsedMs, settings.speed);
-    return lines.map((line, row) => applyRainbowToLine(line, row, motion, settings));
+    const nowMs = Date.now();
+    const inputSettling = isEditorInputSettling(this.lastInputAtMs, nowMs);
+    const elapsedMs = this.animation.getElapsedMs(nowMs);
+    const baseDelay = Math.max(1, getEditorAnimationDelayMs(settings, false));
+    const baseFrame = shouldAnimate(settings, this.animation)
+      ? Math.floor(elapsedMs / baseDelay)
+      : 0;
+    const frame = inputSettling ? this.frozenChromeFrame : baseFrame;
+    if (!inputSettling) {
+      this.frozenChromeFrame = baseFrame;
+    }
+    const key = `${width}:${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${settings.colorInput ? 1 : 0}:${inputSettling ? 1 : 0}:${frame}`;
+
+    if (this.cachedLines && this.cachedRenderKey === key && haveSameLines(this.cachedBaseLines, lines)) {
+      return this.cachedLines;
+    }
+
+    const motion = createRainbowMotion(width, lines.length, settings.turns, frame * baseDelay, settings.speed);
+    const nextLines = lines.map((line, row) => applyRainbowToLine(line, row, motion, settings));
+    this.cachedBaseLines = [...lines];
+    this.cachedRenderKey = key;
+    this.cachedLines = nextLines;
+    return nextLines;
   }
 
   private syncAnimation() {
     const settings = this.store.get();
 
-    if (!shouldAnimate(settings)) {
+    if (!shouldAnimate(settings, this.animation)) {
       this.stopAnimation();
       return;
     }
 
-    const nextDelay = Math.round(frameMs(settings));
+    const nextDelay = Math.round(getEditorAnimationDelayMs(settings, this.isInputSettling()));
     if (this.timer && this.timerDelay === nextDelay) {
       return;
     }
@@ -184,8 +278,16 @@ export class RainbowEditor extends CustomEditor {
     this.stopAnimation();
     this.timerDelay = nextDelay;
     this.timer = setInterval(() => {
+      const animating = this.animation.isAnimating();
       this.tui.requestRender();
+      if (!animating || this.timerDelay !== Math.round(getEditorAnimationDelayMs(this.store.get(), this.isInputSettling()))) {
+        this.syncAnimation();
+      }
     }, nextDelay);
+  }
+
+  private isInputSettling() {
+    return isEditorInputSettling(this.lastInputAtMs, Date.now());
   }
 
   private stopAnimation() {
