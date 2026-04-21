@@ -3,8 +3,11 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { installAssistantMessagePatch } from "./assistant-patch.js";
 import { RainbowEditor } from "./editor.js";
 import { getNextRainbowPresetId, getPreviousRainbowPresetId, getRainbowPreset, findRainbowPreset, RAINBOW_PRESETS } from "./presets.js";
+import { configureRainbowFramePostprocess, isRainbowFramePostprocessEnabled } from "./postprocess.js";
 import { RainbowAnimationController } from "./runtime.js";
 import { showRainbowSettingsDialog } from "./settings-dialog.js";
+import { getAnimationSuppressionReason, getEffectiveAnimationSpeed } from "./terminal.js";
+import { installRainbowTuiHooks, shouldInstallRainbowTuiHooks } from "./tui-hook.js";
 import {
   DEFAULT_SETTINGS,
   RainbowSettingsStore,
@@ -24,9 +27,16 @@ const formatNumber = (value: number, digits: number) => {
 export default function rainbowPlugin(pi: ExtensionAPI) {
   const store = new RainbowSettingsStore(DEFAULT_SETTINGS);
   const animation = new RainbowAnimationController();
+  const useFramePostprocess = isRainbowFramePostprocessEnabled();
   let loadPromise: Promise<void> | undefined;
 
-  installAssistantMessagePatch(store, animation);
+  if (shouldInstallRainbowTuiHooks()) {
+    installRainbowTuiHooks();
+  }
+
+  if (!useFramePostprocess) {
+    installAssistantMessagePatch(store, animation);
+  }
 
   const ensureLoaded = async () => {
     if (!loadPromise) {
@@ -40,7 +50,7 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
 
   const setStatus = (ctx: { hasUI: boolean; ui: { setStatus: (id: string, text: string | undefined) => void; theme: any } }, settings = store.get()) => {
     const preset = getRainbowPreset(settings.preset);
-     
+
     if (!ctx.hasUI) return;
 
     if (!settings.showStatus) {
@@ -48,9 +58,15 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
       return;
     }
 
+    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
+    const suppressionReason = getAnimationSuppressionReason(settings);
+    const speed = effectiveSpeed > 0
+      ? ` anim:${formatNumber(effectiveSpeed, 3)}`
+      : settings.speed > 0 && suppressionReason
+        ? ` static:${suppressionReason}`
+        : " static";
     const theme = ctx.ui.theme;
     const label = settings.enabled ? theme.fg("success", "rainbow") : theme.fg("dim", "rainbow off");
-    const speed = settings.speed > 0 ? ` anim:${formatNumber(settings.speed, 3)}` : " static";
     const detail = theme.fg(
       "dim",
       ` ${preset.name} fg:${settings.fg ? "on" : "off"}${speed} bands:${formatNumber(settings.turns, 2)}`,
@@ -75,6 +91,10 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
       return;
     }
 
+    if (useFramePostprocess) {
+      configureRainbowFramePostprocess(store, animation, () => ctx.ui.theme);
+    }
+
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
       return new RainbowEditor(tui, theme, keybindings, store, animation);
     });
@@ -87,7 +107,8 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async () => {
-    animation.stop(store.get().speed);
+    const settings = store.get();
+    animation.stop(getEffectiveAnimationSpeed(settings.speed, settings));
   });
 
   pi.on("session_shutdown", async () => {

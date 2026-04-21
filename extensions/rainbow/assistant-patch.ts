@@ -16,6 +16,7 @@ import {
 import { DEFAULT_PRESET_ID } from "./presets.js";
 import type { RainbowAnimationController } from "./runtime.js";
 import type { RainbowSettingsStore } from "./settings.js";
+import { getEffectiveAnimationSpeed, isTmuxFriendlyRendering } from "./terminal.js";
 
 type AssistantContent =
   | { type: "text"; text: string }
@@ -89,6 +90,7 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const USER_BORDER_CHARS = /[╭╮╰╯│─]/u;
 const DEFAULT_FG_ANSI = "\x1b[39m";
 const LINE_PARSE_CACHE_LIMIT = 800;
+const DISABLE_TOOL_BOX_OVERRIDES = true;
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const parsedLineCache = new Map<string, ParsedLine>();
@@ -129,7 +131,7 @@ const getPatchState = () => {
 
   if (!scopedGlobal[PATCH_STATE_KEY]) {
     scopedGlobal[PATCH_STATE_KEY] = {
-      getSettings: () => ({ enabled: true, fg: true, colorInput: false, colorToolBoxes: true, animateToolBoxes: true, showStatus: false, bg: false, preset: DEFAULT_PRESET_ID, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
+      getSettings: () => ({ enabled: true, fg: true, colorInput: false, colorToolBoxes: false, animateToolBoxes: false, animateInTmux: false, showStatus: false, bg: false, preset: DEFAULT_PRESET_ID, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
       getElapsedMs: () => 0,
       assistantOrderCounter: 0,
       latestAssistantOrder: 0,
@@ -579,6 +581,70 @@ const colorizePlainTextLine = (
   return changed ? result : line;
 };
 
+const colorizePlainTextLineTmux = (
+  line: string,
+  row: number,
+  motion: RainbowMotion,
+  preset: string,
+  vibrance: number,
+) => {
+  let result = "";
+  let column = 0;
+  let changed = false;
+  let currentFgCode: string | null = null;
+  let currentFgRgb: RGB | null = null;
+  let currentRestoreFgAnsi = DEFAULT_FG_ANSI;
+
+  for (let index = 0; index < line.length; ) {
+    if (line.charCodeAt(index) === 0x1b) {
+      const sequence = readEscapeSequence(line, index);
+      if (sequence) {
+        result += sequence;
+
+        if (sequence.endsWith("m")) {
+          currentFgCode = updateForegroundColorCode(currentFgCode, sequence);
+          currentFgRgb = colorCodeToRgb(currentFgCode);
+          currentRestoreFgAnsi = currentFgCode ? `\x1b[${currentFgCode}m` : DEFAULT_FG_ANSI;
+        }
+
+        index += sequence.length;
+        continue;
+      }
+    }
+
+    let nextEscape = index;
+    while (nextEscape < line.length && line.charCodeAt(nextEscape) !== 0x1b) {
+      nextEscape += 1;
+    }
+
+    const chunk = line.slice(index, nextEscape);
+    const chunkWidth = visibleWidth(chunk);
+    if (chunkWidth === 0) {
+      result += chunk;
+      index = nextEscape;
+      continue;
+    }
+
+    if (chunk.trim().length === 0) {
+      result += chunk;
+      column += chunkWidth;
+      index = nextEscape;
+      continue;
+    }
+
+    const phase = phaseAt(motion, row, column);
+    const color = currentFgRgb
+      ? offsetRainbowColor(currentFgRgb, phase, preset, vibrance)
+      : getRainbowColor(phase, preset, vibrance);
+    result += `${fgCode(color.r, color.g, color.b)}${chunk}${currentRestoreFgAnsi}`;
+    changed = true;
+    column += chunkWidth;
+    index = nextEscape;
+  }
+
+  return changed ? result : line;
+};
+
 const colorizeBorderOnlyLine = (
   line: string,
   row: number,
@@ -644,6 +710,10 @@ export const colorizeToolBoxLine = (
   preset: string,
   vibrance: number,
 ) => {
+  if (DISABLE_TOOL_BOX_OVERRIDES) {
+    return line;
+  }
+
   let activeAnsi = RESET;
   let currentBgCode: string | null = null;
   let currentBgRgb: RGB | null = null;
@@ -698,6 +768,76 @@ export const colorizeToolBoxLine = (
       column += width;
     }
 
+    index = nextEscape;
+  }
+
+  return changed ? `${result}${RESET}` : line;
+};
+
+export const colorizeToolBoxLineTmux = (
+  line: string,
+  row: number,
+  motion: RainbowMotion,
+  preset: string,
+  vibrance: number,
+) => {
+  if (DISABLE_TOOL_BOX_OVERRIDES) {
+    return line;
+  }
+
+  let activeAnsi = RESET;
+  let currentBgCode: string | null = null;
+  let currentBgRgb: RGB | null = null;
+  let result = "";
+  let column = 0;
+  let changed = false;
+
+  for (let index = 0; index < line.length; ) {
+    if (line.charCodeAt(index) === 0x1b) {
+      const sequence = readEscapeSequence(line, index);
+      if (sequence) {
+        result += sequence;
+
+        if (sequence.endsWith("m")) {
+          activeAnsi = ANSI_SGR_RESET.test(sequence)
+            ? RESET
+            : activeAnsi === RESET
+              ? sequence
+              : `${activeAnsi}${sequence}`;
+          currentBgCode = updateBackgroundColorCode(currentBgCode, sequence);
+          currentBgRgb = colorCodeToRgb(currentBgCode);
+        }
+
+        index += sequence.length;
+        continue;
+      }
+    }
+
+    let nextEscape = index;
+    while (nextEscape < line.length && line.charCodeAt(nextEscape) !== 0x1b) {
+      nextEscape += 1;
+    }
+
+    const chunk = line.slice(index, nextEscape);
+    const width = visibleWidth(chunk);
+    if (width === 0) {
+      result += chunk;
+      index = nextEscape;
+      continue;
+    }
+
+    if (!currentBgRgb) {
+      result += chunk;
+      column += width;
+      index = nextEscape;
+      continue;
+    }
+
+    const phase = phaseAt(motion, row, column);
+    const bg = offsetRainbowBackgroundColor(currentBgRgb, phase, preset, vibrance);
+    result += `${bgCode(bg.r, bg.g, bg.b)}${chunk}${activeAnsi}`;
+    changed = true;
+    column += width;
     index = nextEscape;
   }
 
@@ -811,14 +951,15 @@ export const installAssistantMessagePatch = (
       return baseLines;
     }
 
+    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
     const animation = getAssistantAnimationFrame(
       motion,
       patchState.latestAssistantOrder,
-      settings.speed,
+      effectiveSpeed,
       getPatchState().getElapsedMs(),
     );
     const frame = animation.frame;
-    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${motion.phaseSeed}:${motion.renderOrder === patchState.latestAssistantOrder ? 1 : 0}:${frame}:${width}`;
+    const key = `${settings.preset}:${settings.turns}:${effectiveSpeed}:${settings.vibrance}:${motion.phaseSeed}:${motion.renderOrder === patchState.latestAssistantOrder ? 1 : 0}:${frame}:${width}`;
 
     if (motion.cachedLines && haveSameLines(motion.cachedBaseLines, baseLines) && motion.cachedFrame === frame && motion.cachedKey === key) {
       return motion.cachedLines;
@@ -829,10 +970,11 @@ export const installAssistantMessagePatch = (
       baseLines.length,
       settings.turns,
       frameBucketToElapsedMs(animation.frame),
-      settings.speed,
+      effectiveSpeed,
       motion.phaseSeed,
     );
-    const lines = baseLines.map((line, row) => colorizePlainTextLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
+    const colorizeLine = isTmuxFriendlyRendering() ? colorizePlainTextLineTmux : colorizePlainTextLine;
+    const lines = baseLines.map((line, row) => colorizeLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
 
     motion.cachedBaseLines = [...baseLines];
     motion.cachedFrame = frame;
@@ -845,7 +987,7 @@ export const installAssistantMessagePatch = (
     const settings = patchState.getSettings();
     const baseLines = originalToolRender.call(this, width);
 
-    if (!settings.enabled || !settings.fg || !settings.colorToolBoxes || baseLines.length === 0) {
+    if (DISABLE_TOOL_BOX_OVERRIDES || !settings.enabled || !settings.fg || !settings.colorToolBoxes || baseLines.length === 0) {
       return baseLines;
     }
 
@@ -853,6 +995,7 @@ export const installAssistantMessagePatch = (
     const seed = component.toolCallId ?? component.toolName ?? `tool:${width}`;
     const renderState = getToolRenderState(this, seed);
     const isPending = component.isPartial !== false;
+    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
 
     if (renderState.renderOrder === undefined) {
       renderState.renderOrder = ++patchState.toolOrderCounter;
@@ -864,14 +1007,14 @@ export const installAssistantMessagePatch = (
     const animation = getToolAnimationFrame(
       renderState,
       patchState.latestToolOrder,
-      settings.speed,
+      effectiveSpeed,
       getPatchState().getElapsedMs(),
       settings.animateToolBoxes,
       isPending,
     );
     renderState.frozenFrame = animation.nextFrozenFrame;
     const frame = animation.frame;
-    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${settings.animateToolBoxes ? 1 : 0}:${isPending ? 1 : 0}:${renderState.phaseSeed}:${renderState.renderOrder === patchState.latestToolOrder ? 1 : 0}:${frame}:${width}`;
+    const key = `${settings.preset}:${settings.turns}:${effectiveSpeed}:${settings.vibrance}:${settings.animateToolBoxes ? 1 : 0}:${isPending ? 1 : 0}:${renderState.phaseSeed}:${renderState.renderOrder === patchState.latestToolOrder ? 1 : 0}:${frame}:${width}`;
 
     if (renderState.cachedLines && haveSameLines(renderState.cachedBaseLines, baseLines) && renderState.cachedFrame === frame && renderState.cachedKey === key) {
       return renderState.cachedLines;
@@ -882,10 +1025,11 @@ export const installAssistantMessagePatch = (
       baseLines.length,
       settings.turns,
       frameBucketToElapsedMs(animation.frame),
-      settings.speed,
+      effectiveSpeed,
       renderState.phaseSeed,
     );
-    const lines = baseLines.map((line, row) => colorizeToolBoxLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
+    const colorizeToolLine = isTmuxFriendlyRendering() ? colorizeToolBoxLineTmux : colorizeToolBoxLine;
+    const lines = baseLines.map((line, row) => colorizeToolLine(line, row, rainbowMotion, settings.preset, settings.vibrance));
 
     renderState.cachedBaseLines = [...baseLines];
     renderState.cachedFrame = frame;
@@ -910,8 +1054,9 @@ export const installAssistantMessagePatch = (
 
     const signature = `${width}\n${markdown.text}`;
     const renderState = getUserRenderState(this, signature);
-    const frame = settings.speed > 0 ? getFrameBucket(getPatchState().getElapsedMs()) : 0;
-    const key = `${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${frame}:${signature}`;
+    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
+    const frame = effectiveSpeed > 0 ? getFrameBucket(getPatchState().getElapsedMs()) : 0;
+    const key = `${settings.preset}:${settings.turns}:${effectiveSpeed}:${settings.vibrance}:${frame}:${signature}`;
 
     if (renderState.cachedLines && renderState.cachedKey === key) {
       return renderState.cachedLines;
@@ -922,7 +1067,7 @@ export const installAssistantMessagePatch = (
       width,
       frame,
       renderState.phaseSeed,
-      settings.speed,
+      effectiveSpeed,
       settings.turns,
       settings.preset,
       settings.vibrance,

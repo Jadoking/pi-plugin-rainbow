@@ -11,6 +11,7 @@ export type RainbowSettings = {
   colorInput: boolean;
   colorToolBoxes: boolean;
   animateToolBoxes: boolean;
+  animateInTmux: boolean;
   showStatus: boolean;
   bg: boolean;
   preset: string;
@@ -26,8 +27,9 @@ export const DEFAULT_SETTINGS: RainbowSettings = {
   enabled: true,
   fg: true,
   colorInput: false,
-  colorToolBoxes: true,
-  animateToolBoxes: true,
+  colorToolBoxes: false,
+  animateToolBoxes: false,
+  animateInTmux: false,
   showStatus: false,
   bg: false,
   preset: DEFAULT_PRESET_ID,
@@ -59,8 +61,9 @@ export const normalizeSettings = (value: Partial<RainbowSettings> | undefined): 
     enabled: boolValue(value?.enabled, DEFAULT_SETTINGS.enabled),
     fg: boolValue(value?.fg, DEFAULT_SETTINGS.fg),
     colorInput: boolValue(value?.colorInput, DEFAULT_SETTINGS.colorInput),
-    colorToolBoxes: boolValue(value?.colorToolBoxes, DEFAULT_SETTINGS.colorToolBoxes),
-    animateToolBoxes: boolValue(value?.animateToolBoxes, DEFAULT_SETTINGS.animateToolBoxes),
+    colorToolBoxes: false,
+    animateToolBoxes: false,
+    animateInTmux: boolValue(value?.animateInTmux, DEFAULT_SETTINGS.animateInTmux),
     showStatus: boolValue(value?.showStatus, DEFAULT_SETTINGS.showStatus),
     // Background tinting is intentionally disabled in the Pi port.
     bg: false,

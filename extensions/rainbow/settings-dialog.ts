@@ -3,9 +3,11 @@ import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from
 
 import { createRainbowMotion, getRainbowColor, phaseAt } from "./motion.js";
 import { getNextRainbowPresetId, getPreviousRainbowPresetId, getRainbowPreset } from "./presets.js";
+import { noteRainbowRenderTrigger } from "./render-debug.js";
 import { DEFAULT_SETTINGS, type RainbowSettings, type RainbowSettingsStore } from "./settings.js";
+import { getEffectiveAnimationSpeed } from "./terminal.js";
 
-type ToggleField = "enabled" | "fg" | "colorInput" | "colorToolBoxes" | "animateToolBoxes" | "showStatus";
+type ToggleField = "enabled" | "fg" | "colorInput" | "colorToolBoxes" | "animateToolBoxes" | "animateInTmux" | "showStatus";
 type NumberField = "speed" | "turns";
 type PresetField = "preset";
 type Field = ToggleField | NumberField | PresetField;
@@ -57,15 +59,9 @@ const ROWS: Row[] = [
     kind: "toggle",
   },
   {
-    key: "colorToolBoxes",
-    title: "Color tool boxes",
-    description: "Tint tool call and result boxes with the active palette while preserving pending, success, and error semantics.",
-    kind: "toggle",
-  },
-  {
-    key: "animateToolBoxes",
-    title: "Animate tool boxes",
-    description: "Animate pending tool boxes only, then freeze them in place as soon as they complete.",
+    key: "animateInTmux",
+    title: "Animate in tmux",
+    description: "Keep live animation enabled inside tmux. Off by default because multiplexed redraws can jitter.",
     kind: "toggle",
   },
   {
@@ -117,7 +113,8 @@ const fgCode = (r: number, g: number, b: number) => {
 };
 
 const colorizePreviewLine = (text: string, row: number, settings: RainbowSettings, elapsedMs: number) => {
-  const motion = createRainbowMotion(Math.max(1, visibleWidth(text)), 2, settings.turns, elapsedMs, settings.speed);
+  const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
+  const motion = createRainbowMotion(Math.max(1, visibleWidth(text)), 2, settings.turns, effectiveSpeed > 0 ? elapsedMs : 0, effectiveSpeed);
   let result = "";
   let column = 0;
 
@@ -331,7 +328,7 @@ export class RainbowSettingsDialog {
   }
 
   private syncPreviewTimer() {
-    if (!this.requestRender || this.value.speed <= 0) {
+    if (!this.requestRender || getEffectiveAnimationSpeed(this.value.speed, this.value) <= 0) {
       this.stopPreviewTimer();
       return;
     }
@@ -341,6 +338,7 @@ export class RainbowSettingsDialog {
     }
 
     this.previewTimer = setInterval(() => {
+      noteRainbowRenderTrigger("settings-preview", { delayMs: PREVIEW_TICK_MS });
       this.requestRender?.();
     }, PREVIEW_TICK_MS);
   }
@@ -374,6 +372,7 @@ export class RainbowSettingsDialog {
     this.value = next;
     this.syncPreviewTimer();
     this.onChange(next);
+    noteRainbowRenderTrigger("settings-apply");
     this.requestRender?.();
   }
 }

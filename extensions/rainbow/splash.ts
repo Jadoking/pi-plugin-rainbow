@@ -6,7 +6,9 @@ import {
   getRainbowColor,
   phaseAt,
 } from "./motion.js";
+import { noteRainbowRenderTrigger } from "./render-debug.js";
 import type { RainbowSettings } from "./settings.js";
+import { getEffectiveAnimationSpeed } from "./terminal.js";
 
 type SplashContext = {
   ui: Pick<ExtensionCommandContext["ui"], "custom">;
@@ -40,9 +42,10 @@ const center = (text: string, width: number) => {
 
 const colorize = (text: string, elapsedMs: number, row: number, settings: RainbowSettings) => {
   const chars = Array.from(text);
-  const flash = elapsedMs < 1100 ? 1 - elapsedMs / 1100 : 0;
-  const motionElapsedMs = settings.speed > 0 ? elapsedMs : 0;
-  const motion = createRainbowMotion(chars.length, LOGO.length, settings.turns, motionElapsedMs, settings.speed);
+  const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
+  const flash = effectiveSpeed > 0 && elapsedMs < 1100 ? 1 - elapsedMs / 1100 : 0;
+  const motionElapsedMs = effectiveSpeed > 0 ? elapsedMs : 0;
+  const motion = createRainbowMotion(chars.length, LOGO.length, settings.turns, motionElapsedMs, effectiveSpeed);
 
   return chars
     .map((char, index) => {
@@ -62,7 +65,7 @@ class RainbowSplash {
   readonly focused = true;
 
   private readonly startedAt = Date.now();
-  private readonly timer: ReturnType<typeof setInterval>;
+  private readonly timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly tui: { requestRender: () => void },
@@ -70,13 +73,18 @@ class RainbowSplash {
     private readonly settings: RainbowSettings,
     private readonly done: () => void,
   ) {
-    this.timer = setInterval(() => {
-      this.tui.requestRender();
-    }, 50);
+    this.timer = getEffectiveAnimationSpeed(settings.speed, settings) > 0
+      ? setInterval(() => {
+        noteRainbowRenderTrigger("splash-timer", { delayMs: 50 });
+        this.tui.requestRender();
+      }, 50)
+      : undefined;
   }
 
   dispose() {
-    clearInterval(this.timer);
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
   }
 
   invalidate() {}

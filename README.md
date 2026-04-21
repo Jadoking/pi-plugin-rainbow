@@ -10,6 +10,7 @@ This package now leans into Pi-friendly color theming:
 
 - preset-driven rainbow and theme-inspired foreground palettes
 - request-progress animation that only runs while Pi is working, then settles back to the base palette
+- tmux-friendly rendering that uses a coarser animation path to reduce redraw jitter, plus settings/env controls for motion
 - rainbow assistant output for plain markdown text
 - live settings UI with persistent per-user values
 - `ctrl+shift+r` splash shortcut
@@ -24,8 +25,8 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 
 ## What It Does
 
-- decorates assistant output, tool call/result boxes, and request-time previews with palette animation by default
-- lets you toggle tool-box coloring and tool-box animation separately in settings
+- decorates assistant output and request-time previews with palette animation by default
+- lets you tune tmux animation behavior in settings
 - keeps the editor's top and bottom bars themed/animated, while typed input recoloring is optional and disabled by default until it is faster
 - decorates built-in assistant messages with cached palette rendering for plain text spans
 - ships presets based on popular palettes like Catppuccin, Dracula, Gruvbox, Nord, Tokyo Night, and more
@@ -41,8 +42,9 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 - `enabled: true`
 - `fg: true`
 - `colorInput: false`
-- `colorToolBoxes: true`
-- `animateToolBoxes: true`
+- `colorToolBoxes: false`
+- `animateToolBoxes: false`
+- `animateInTmux: false`
 - `showStatus: false`
 - `bg: false`
 - `preset: classic-rainbow`
@@ -105,6 +107,7 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 - This package targets interactive Pi CLI, not Ralph's non-interactive `pi --print --mode json` adapter path.
 - Assistant output is patched at the component level, not via a whole-screen framebuffer hook.
 - Styled markdown spans such as code blocks, links, and syntax-highlighted regions are intentionally preserved instead of being recolored blindly.
-- Tool execution boxes keep their semantic success/error/pending base colors, then receive a darker palette-offset rainbow tint on top; pending boxes animate and completed boxes freeze.
+- Tool execution boxes are left at Pi defaults (no custom tool-box recoloring or animation overrides).
 - Editor text recoloring is off by default because it is the slowest path; the editor's top and bottom bars still animate with the active palette, but the prompt area briefly backs off animation while you type to reduce input lag.
+- When Pi runs inside tmux, the plugin uses a tmux-friendlier rendering path with much lower ANSI churn. Live animation is still reduced to static by default to avoid multiplexer redraw jitter, but you can re-enable motion with the `Animate in tmux` setting or `PI_RAINBOW_FORCE_ANIMATION=1`.
 - For distributed installs, Pi core packages are intentionally listed as peers so the plugin patches the host runtime instead of a private duplicate copy.

@@ -27,6 +27,7 @@ test("normalizeSettings keeps the preset, editor, tool-box, footer, and vibrance
   assert.equal(normalized.colorInput, DEFAULT_SETTINGS.colorInput);
   assert.equal(normalized.colorToolBoxes, DEFAULT_SETTINGS.colorToolBoxes);
   assert.equal(normalized.animateToolBoxes, DEFAULT_SETTINGS.animateToolBoxes);
+  assert.equal(normalized.animateInTmux, DEFAULT_SETTINGS.animateInTmux);
   assert.equal(normalized.showStatus, DEFAULT_SETTINGS.showStatus);
   assert.equal(normalized.vibrance, DEFAULT_SETTINGS.vibrance);
 });

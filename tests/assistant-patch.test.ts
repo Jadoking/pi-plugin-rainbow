@@ -89,12 +89,10 @@ test("getToolAnimationFrame animates pending tool boxes and freezes them on comp
   assert.equal(disabled.frame, 7);
 });
 
-test("colorizeToolBoxLine rainbow-tints tool box backgrounds while leaving plain text unchanged", () => {
+test("colorizeToolBoxLine keeps default tool box rendering when tool overrides are disabled", () => {
   const motion = createRainbowMotion(16, 1, 3, 0, 0.008, 0.17);
   const line = "\x1b[48;2;40;50;60m tool \x1b[49m";
-  const tinted = colorizeToolBoxLine(line, 0, motion, "dracula", 0.35);
 
-  assert.notEqual(tinted, line);
-  assert.match(tinted, /\x1b\[48;2;\d+;\d+;\d+m/);
+  assert.equal(colorizeToolBoxLine(line, 0, motion, "dracula", 0.35), line);
   assert.equal(colorizeToolBoxLine("plain text", 0, motion, "dracula", 0.35), "plain text");
 });

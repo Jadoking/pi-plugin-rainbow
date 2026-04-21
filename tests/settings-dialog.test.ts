@@ -34,7 +34,7 @@ test("settings dialog shows the selected palette preview on the preset option", 
   );
 });
 
-test("settings dialog shows dedicated tool-box toggles", () => {
+test("settings dialog keeps tmux animation toggle and omits removed tool-box toggles", () => {
   const dialog = new RainbowSettingsDialog(
     mockTheme,
     { ...DEFAULT_SETTINGS, preset: "dracula" },
@@ -44,8 +44,9 @@ test("settings dialog shows dedicated tool-box toggles", () => {
 
   const lines = dialog.render(90);
 
-  assert.ok(lines.some((line) => line.includes("Color tool boxes")));
-  assert.ok(lines.some((line) => line.includes("Animate tool boxes")));
+  assert.equal(lines.some((line) => line.includes("Color tool boxes")), false);
+  assert.equal(lines.some((line) => line.includes("Animate tool boxes")), false);
+  assert.ok(lines.some((line) => line.includes("Animate in tmux")));
 });
 
 test("settings dialog wraps long descriptions so animation speed remains readable", () => {

@@ -7,8 +7,11 @@ import {
   phaseAt,
   type RainbowMotion,
 } from "./motion.js";
+import { isRainbowFramePostprocessEnabled } from "./postprocess.js";
 import type { RainbowAnimationController } from "./runtime.js";
 import type { RainbowSettings, RainbowSettingsStore } from "./settings.js";
+import { noteRainbowRenderTrigger } from "./render-debug.js";
+import { getEffectiveAnimationSpeed, isTmuxFriendlyRendering } from "./terminal.js";
 
 const RESET = "\x1b[0m";
 const ANSI_SGR_RESET = /^\x1b\[(?:0(?:;0)*)?m$/;
@@ -30,7 +33,9 @@ export const getEditorAnimationDelayMs = (settings: RainbowSettings, inputSettli
   const minFps = 20;
   const maxFps = 30;
   const phaseStep = 0.03;
-  const phaseRate = settings.speed * (settings.fg ? 0.1 : 0.04);
+  const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
+  const hasAnimatedSurface = settings.fg || (isRainbowFramePostprocessEnabled() && settings.colorToolBoxes);
+  const phaseRate = effectiveSpeed * (hasAnimatedSurface ? 0.1 : 0.04);
 
   const baseDelay = phaseRate <= 0
     ? 1000 / minFps
@@ -67,7 +72,9 @@ export const getEditorLineColorMode = (line: string, settings: RainbowSettings):
 };
 
 const shouldAnimate = (settings: RainbowSettings, animation: RainbowAnimationController) => {
-  return shouldDecorateEditor(settings) && settings.speed > 0 && animation.isAnimating();
+  const hasAnimatedSurface = shouldDecorateEditor(settings)
+    || (isRainbowFramePostprocessEnabled() && settings.enabled && settings.colorToolBoxes);
+  return hasAnimatedSurface && getEffectiveAnimationSpeed(settings.speed, settings) > 0 && animation.isAnimating();
 };
 
 const readEscapeSequence = (line: string, index: number) => {
@@ -180,6 +187,71 @@ const applyRainbowToLine = (
   return changed ? `${result}${RESET}` : line;
 };
 
+const applyRainbowToLineTmux = (
+  line: string,
+  row: number,
+  motion: RainbowMotion,
+  settings: RainbowSettings,
+) => {
+  if (getEditorLineColorMode(line, settings) === "none") {
+    return line;
+  }
+
+  let activeAnsi = RESET;
+  let result = "";
+  let column = 0;
+  let changed = false;
+
+  for (let i = 0; i < line.length; ) {
+    if (line.charCodeAt(i) === 0x1b) {
+      const sequence = readEscapeSequence(line, i);
+      if (sequence) {
+        result += sequence;
+
+        if (sequence.endsWith("m")) {
+          activeAnsi = ANSI_SGR_RESET.test(sequence)
+            ? RESET
+            : activeAnsi === RESET
+              ? sequence
+              : `${activeAnsi}${sequence}`;
+        }
+
+        i += sequence.length;
+        continue;
+      }
+    }
+
+    let nextEscape = i;
+    while (nextEscape < line.length && line.charCodeAt(nextEscape) !== 0x1b) {
+      nextEscape += 1;
+    }
+
+    const chunk = line.slice(i, nextEscape);
+    const chunkWidth = visibleWidth(chunk);
+    if (chunkWidth === 0) {
+      result += chunk;
+      i = nextEscape;
+      continue;
+    }
+
+    if (chunk.trim().length === 0) {
+      result += chunk;
+      column += chunkWidth;
+      i = nextEscape;
+      continue;
+    }
+
+    const phase = phaseAt(motion, row, column);
+    const fg = getRainbowColor(phase, settings.preset, settings.vibrance);
+    result += `${fgCode(fg.r, fg.g, fg.b)}${chunk}${activeAnsi}`;
+    changed = true;
+    column += chunkWidth;
+    i = nextEscape;
+  }
+
+  return changed ? `${result}${RESET}` : line;
+};
+
 export class RainbowEditor extends CustomEditor {
   private readonly unsubscribers: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -202,10 +274,12 @@ export class RainbowEditor extends CustomEditor {
     this.unsubscribers.push(
       store.subscribe(() => {
         this.syncAnimation();
+        noteRainbowRenderTrigger("editor-store");
         this.tui.requestRender();
       }),
       animation.subscribe(() => {
         this.syncAnimation();
+        noteRainbowRenderTrigger("editor-animation");
         this.tui.requestRender();
       }),
     );
@@ -230,6 +304,13 @@ export class RainbowEditor extends CustomEditor {
     const lines = super.render(width);
     const settings = this.store.get();
 
+    if (isRainbowFramePostprocessEnabled()) {
+      this.cachedBaseLines = undefined;
+      this.cachedRenderKey = undefined;
+      this.cachedLines = undefined;
+      return lines;
+    }
+
     if (!shouldDecorateEditor(settings)) {
       this.cachedBaseLines = undefined;
       this.cachedRenderKey = undefined;
@@ -239,6 +320,7 @@ export class RainbowEditor extends CustomEditor {
 
     const nowMs = Date.now();
     const inputSettling = isEditorInputSettling(this.lastInputAtMs, nowMs);
+    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
     const elapsedMs = this.animation.getElapsedMs(nowMs);
     const baseDelay = Math.max(1, getEditorAnimationDelayMs(settings, false));
     const baseFrame = shouldAnimate(settings, this.animation)
@@ -248,14 +330,15 @@ export class RainbowEditor extends CustomEditor {
     if (!inputSettling) {
       this.frozenChromeFrame = baseFrame;
     }
-    const key = `${width}:${settings.preset}:${settings.turns}:${settings.speed}:${settings.vibrance}:${settings.colorInput ? 1 : 0}:${inputSettling ? 1 : 0}:${frame}`;
+    const key = `${width}:${settings.preset}:${settings.turns}:${effectiveSpeed}:${settings.vibrance}:${settings.colorInput ? 1 : 0}:${inputSettling ? 1 : 0}:${frame}`;
 
     if (this.cachedLines && this.cachedRenderKey === key && haveSameLines(this.cachedBaseLines, lines)) {
       return this.cachedLines;
     }
 
-    const motion = createRainbowMotion(width, lines.length, settings.turns, frame * baseDelay, settings.speed);
-    const nextLines = lines.map((line, row) => applyRainbowToLine(line, row, motion, settings));
+    const motion = createRainbowMotion(width, lines.length, settings.turns, frame * baseDelay, effectiveSpeed);
+    const colorizeLine = isTmuxFriendlyRendering() ? applyRainbowToLineTmux : applyRainbowToLine;
+    const nextLines = lines.map((line, row) => colorizeLine(line, row, motion, settings));
     this.cachedBaseLines = [...lines];
     this.cachedRenderKey = key;
     this.cachedLines = nextLines;
@@ -279,6 +362,7 @@ export class RainbowEditor extends CustomEditor {
     this.timerDelay = nextDelay;
     this.timer = setInterval(() => {
       const animating = this.animation.isAnimating();
+      noteRainbowRenderTrigger("editor-timer", { timerDelay: this.timerDelay });
       this.tui.requestRender();
       if (!animating || this.timerDelay !== Math.round(getEditorAnimationDelayMs(this.store.get(), this.isInputSettling()))) {
         this.syncAnimation();
