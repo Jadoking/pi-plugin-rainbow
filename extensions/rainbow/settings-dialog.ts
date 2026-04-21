@@ -55,7 +55,7 @@ const ROWS: Row[] = [
   {
     key: "colorInput",
     title: "Color typed input",
-    description: "Recolor text while typing in the editor. Off by default until the editor path is faster.",
+    description: "Animate only the prompt entry area in the editor.",
     kind: "toggle",
   },
   {
@@ -98,7 +98,6 @@ const ROWS: Row[] = [
 ];
 
 const RESET = "\x1b[0m";
-const PREVIEW_TICK_MS = 33;
 const PREVIEW_BAR_CHAR = "█";
 const PREVIEW_TEXT = " PI RAINBOW PREVIEW ";
 
@@ -186,7 +185,6 @@ const wrapRowContent = (content: string, width: number) => {
 export class RainbowSettingsDialog {
   readonly width = 92;
 
-  private readonly startedAtMs: number;
   private selected = 0;
   private value: RainbowSettings;
   private previewTimer: ReturnType<typeof setInterval> | undefined;
@@ -200,7 +198,6 @@ export class RainbowSettingsDialog {
     private readonly now: () => number = () => Date.now(),
   ) {
     this.value = initial;
-    this.startedAtMs = this.now();
     this.syncPreviewTimer();
   }
 
@@ -269,7 +266,7 @@ export class RainbowSettingsDialog {
   render(width: number) {
     const innerWidth = Math.max(24, Math.min(this.width, width) - 2);
     const previewWidth = Math.max(12, innerWidth - 4);
-    const previewElapsedMs = this.now() - this.startedAtMs;
+    const previewElapsedMs = 0;
     const lines: string[] = [];
     const border = this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`);
     const footer = this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
@@ -328,19 +325,7 @@ export class RainbowSettingsDialog {
   }
 
   private syncPreviewTimer() {
-    if (!this.requestRender || getEffectiveAnimationSpeed(this.value.speed, this.value) <= 0) {
-      this.stopPreviewTimer();
-      return;
-    }
-
-    if (this.previewTimer) {
-      return;
-    }
-
-    this.previewTimer = setInterval(() => {
-      noteRainbowRenderTrigger("settings-preview", { delayMs: PREVIEW_TICK_MS });
-      this.requestRender?.();
-    }, PREVIEW_TICK_MS);
+    this.stopPreviewTimer();
   }
 
   private stopPreviewTimer() {

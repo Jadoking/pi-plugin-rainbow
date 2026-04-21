@@ -26,7 +26,7 @@ type Listener = (value: RainbowSettings) => void;
 export const DEFAULT_SETTINGS: RainbowSettings = {
   enabled: true,
   fg: true,
-  colorInput: false,
+  colorInput: true,
   colorToolBoxes: false,
   animateToolBoxes: false,
   animateInTmux: false,

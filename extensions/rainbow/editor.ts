@@ -34,7 +34,7 @@ export const getEditorAnimationDelayMs = (settings: RainbowSettings, inputSettli
   const maxFps = 30;
   const phaseStep = 0.03;
   const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
-  const hasAnimatedSurface = settings.fg || (isRainbowFramePostprocessEnabled() && settings.colorToolBoxes);
+  const hasAnimatedSurface = settings.fg && settings.colorInput;
   const phaseRate = effectiveSpeed * (hasAnimatedSurface ? 0.1 : 0.04);
 
   const baseDelay = phaseRate <= 0
@@ -65,15 +65,14 @@ export const getEditorLineColorMode = (line: string, settings: RainbowSettings):
   }
 
   if (isEditorChromeLine(line)) {
-    return "all";
+    return "none";
   }
 
   return settings.colorInput ? "all" : "none";
 };
 
 const shouldAnimate = (settings: RainbowSettings, animation: RainbowAnimationController) => {
-  const hasAnimatedSurface = shouldDecorateEditor(settings)
-    || (isRainbowFramePostprocessEnabled() && settings.enabled && settings.colorToolBoxes);
+  const hasAnimatedSurface = shouldDecorateEditor(settings) && settings.colorInput;
   return hasAnimatedSurface && getEffectiveAnimationSpeed(settings.speed, settings) > 0 && animation.isAnimating();
 };
 

@@ -91,6 +91,7 @@ const USER_BORDER_CHARS = /[╭╮╰╯│─]/u;
 const DEFAULT_FG_ANSI = "\x1b[39m";
 const LINE_PARSE_CACHE_LIMIT = 800;
 const DISABLE_TOOL_BOX_OVERRIDES = true;
+const DISABLE_USER_PROMPT_OUTLINE_OVERRIDES = true;
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const parsedLineCache = new Map<string, ParsedLine>();
@@ -131,7 +132,7 @@ const getPatchState = () => {
 
   if (!scopedGlobal[PATCH_STATE_KEY]) {
     scopedGlobal[PATCH_STATE_KEY] = {
-      getSettings: () => ({ enabled: true, fg: true, colorInput: false, colorToolBoxes: false, animateToolBoxes: false, animateInTmux: false, showStatus: false, bg: false, preset: DEFAULT_PRESET_ID, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
+      getSettings: () => ({ enabled: true, fg: true, colorInput: true, colorToolBoxes: false, animateToolBoxes: false, animateInTmux: false, showStatus: false, bg: false, preset: DEFAULT_PRESET_ID, speed: 0.008, turns: 3, vibrance: DEFAULT_VIBRANCE, glow: 0.05 }),
       getElapsedMs: () => 0,
       assistantOrderCounter: 0,
       latestAssistantOrder: 0,
@@ -1041,7 +1042,7 @@ export const installAssistantMessagePatch = (
   UserMessageComponent.prototype.render = function patchedUserRender(width: number) {
     const settings = patchState.getSettings();
 
-    if (!settings.enabled || !settings.fg) {
+    if (DISABLE_USER_PROMPT_OUTLINE_OVERRIDES || !settings.enabled || !settings.fg) {
       return originalUserRender.call(this, width);
     }
 

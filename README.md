@@ -27,7 +27,7 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 
 - decorates assistant output and request-time previews with palette animation by default
 - lets you tune tmux animation behavior in settings
-- keeps the editor's top and bottom bars themed/animated, while typed input recoloring is optional and disabled by default until it is faster
+- keeps animation focused on assistant text and the prompt entry area
 - decorates built-in assistant messages with cached palette rendering for plain text spans
 - ships presets based on popular palettes like Catppuccin, Dracula, Gruvbox, Nord, Tokyo Night, and more
 - persists settings under `~/.pi/agent/state/pi-plugin-rainbow.json`
@@ -41,7 +41,7 @@ pi install https://github.com/Jadoking/pi-plugin-rainbow.git
 
 - `enabled: true`
 - `fg: true`
-- `colorInput: false`
+- `colorInput: true`
 - `colorToolBoxes: false`
 - `animateToolBoxes: false`
 - `animateInTmux: false`
@@ -108,6 +108,6 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 - Assistant output is patched at the component level, not via a whole-screen framebuffer hook.
 - Styled markdown spans such as code blocks, links, and syntax-highlighted regions are intentionally preserved instead of being recolored blindly.
 - Tool execution boxes are left at Pi defaults (no custom tool-box recoloring or animation overrides).
-- Editor text recoloring is off by default because it is the slowest path; the editor's top and bottom bars still animate with the active palette, but the prompt area briefly backs off animation while you type to reduce input lag.
+- Animation is intentionally scoped to assistant text and the editor prompt entry area; tool boxes and other non-text UI regions keep Pi defaults.
 - When Pi runs inside tmux, the plugin uses a tmux-friendlier rendering path with much lower ANSI churn. Live animation is still reduced to static by default to avoid multiplexer redraw jitter, but you can re-enable motion with the `Animate in tmux` setting or `PI_RAINBOW_FORCE_ANIMATION=1`.
 - For distributed installs, Pi core packages are intentionally listed as peers so the plugin patches the host runtime instead of a private duplicate copy.

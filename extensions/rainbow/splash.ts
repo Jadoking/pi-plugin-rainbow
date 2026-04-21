@@ -6,7 +6,6 @@ import {
   getRainbowColor,
   phaseAt,
 } from "./motion.js";
-import { noteRainbowRenderTrigger } from "./render-debug.js";
 import type { RainbowSettings } from "./settings.js";
 import { getEffectiveAnimationSpeed } from "./terminal.js";
 
@@ -16,6 +15,8 @@ type SplashContext = {
 
 const RESET = "\x1b[0m";
 const SPLASH_FLASH_STRENGTH = 0.64;
+const ENABLE_SPLASH_ANIMATION = false;
+
 const LOGO = [
   "██████╗ ██╗",
   "██╔══██╗██║",
@@ -73,9 +74,8 @@ class RainbowSplash {
     private readonly settings: RainbowSettings,
     private readonly done: () => void,
   ) {
-    this.timer = getEffectiveAnimationSpeed(settings.speed, settings) > 0
+    this.timer = ENABLE_SPLASH_ANIMATION && getEffectiveAnimationSpeed(settings.speed, settings) > 0
       ? setInterval(() => {
-        noteRainbowRenderTrigger("splash-timer", { delayMs: 50 });
         this.tui.requestRender();
       }, 50)
       : undefined;
@@ -97,7 +97,7 @@ class RainbowSplash {
 
   render(width: number) {
     const innerWidth = Math.max(20, Math.min(this.width, width) - 2);
-    const elapsedMs = Date.now() - this.startedAt;
+    const elapsedMs = ENABLE_SPLASH_ANIMATION ? Date.now() - this.startedAt : 0;
     const lines: string[] = [];
 
     lines.push(this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`));

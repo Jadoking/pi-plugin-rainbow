@@ -15,12 +15,12 @@ test("isEditorChromeLine detects editor border bars and scroll indicators", () =
   assert.equal(isEditorChromeLine("hello world"), false);
 });
 
-test("getEditorLineColorMode keeps chrome animated while typed input stays plain by default", () => {
-  assert.equal(getEditorLineColorMode("────────────────────────", DEFAULT_SETTINGS), "all");
-  assert.equal(getEditorLineColorMode("typed input here", DEFAULT_SETTINGS), "none");
+test("getEditorLineColorMode keeps chrome static while prompt input stays animated by default", () => {
+  assert.equal(getEditorLineColorMode("────────────────────────", DEFAULT_SETTINGS), "none");
+  assert.equal(getEditorLineColorMode("typed input here", DEFAULT_SETTINGS), "all");
   assert.equal(
-    getEditorLineColorMode("typed input here", { ...DEFAULT_SETTINGS, colorInput: true }),
-    "all",
+    getEditorLineColorMode("typed input here", { ...DEFAULT_SETTINGS, colorInput: false }),
+    "none",
   );
 });
 
