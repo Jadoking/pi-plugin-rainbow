@@ -45,6 +45,11 @@ export type FrameRow = {
 	used: number;
 	/** Image / unknown-protocol rows are passed through untouched. */
 	skip: boolean;
+	/**
+	 * Colour this row, but keep effects off it. A one-line editor or a footer
+	 * is too thin for particles: they read as noise rather than atmosphere.
+	 */
+	quiet: boolean;
 	/** Set when any cell changed, so unchanged rows can keep their original string. */
 	dirty: boolean;
 };
@@ -148,6 +153,7 @@ export function buildFrame(lines: string[], width: number, height: number, padTo
 				byCol: [],
 				used: 0,
 				skip: true,
+				quiet: true,
 				dirty: false,
 			};
 			continue;
@@ -173,7 +179,7 @@ export function buildFrame(lines: string[], width: number, height: number, padTo
 			}
 		}
 
-		rows[i] = { index: i, raw, line: parsed, cells, byCol, used, skip: false, dirty: padTo && used < width };
+		rows[i] = { index: i, raw, line: parsed, cells, byCol, used, skip: false, quiet: false, dirty: padTo && used < width };
 	}
 
 	return { width, height, rows, cursor: null };

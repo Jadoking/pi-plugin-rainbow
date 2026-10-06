@@ -11,6 +11,7 @@ import { buildFrame, emitFrame, type Frame } from "./frame.js";
 import { allFx, type FxContext, type FxEvent, type FxLayer, type FxTuning, makeRng } from "./fx.js";
 import "./fx-particles.js";
 import "./fx-post.js";
+import { applyScope, isChromeGlyph, type Layout, type RainbowScope } from "./layout.js";
 import { presetIds, rampFor } from "./presets.js";
 import type { RainbowSettings } from "./settings.js";
 
@@ -209,8 +210,13 @@ export class RainbowEngine {
 			reducedMotion: s.reducedMotion,
 		};
 
+		// 0. Work out where pi's chrome is, and mute everything outside it when
+		// the scope asks us to. Rows marked `skip` are passed through verbatim
+		// by both the colouriser and every effect layer, so one flag is enough.
+		const layout = applyScope(frame, s.scope);
+
 		// 1. Base gradient colouring.
-		this.colorize(frame, field, ramp, calm ? 0.45 : 1);
+		this.colorize(frame, field, ramp, calm ? 0.45 : 1, layout, s.scope);
 
 		// 2. Effect layers.
 		{
@@ -272,21 +278,35 @@ export class RainbowEngine {
 	}
 
 	/** Base pass: map every cell through the gradient field. */
-	private colorize(frame: Frame, field: FieldState, ramp: Ramp, scale: number): void {
+	private colorize(
+		frame: Frame,
+		field: FieldState,
+		ramp: Ramp,
+		scale: number,
+		layout: Layout,
+		scope: RainbowScope,
+	): void {
 		const s = this.settings;
 		const blend = clamp01(s.blend * scale);
 		if (blend <= 0 || (!s.colorText && !s.colorBackground)) return;
 
 		const vib = s.vibrance;
 		const bright = s.brightness;
+		// Backgrounds are a scope decision, not just a setting: `text` mode is
+		// defined by never painting one, and `chrome` only ever hits glyphs.
+		const paintBg = s.colorBackground && scope !== "text" && scope !== "chrome";
 
 		for (let y = 0; y < frame.rows.length; y++) {
 			const row = frame.rows[y]!;
 			if (row.skip) continue;
+			const isRule = layout.rowRule[y] === true;
 			const cells = row.cells;
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i]!;
 				if (cell.style.inverse) continue;
+				// `chrome` is a per-cell scope, not a per-row one: a rule with a
+				// label in it should colour the rule and leave the label alone.
+				if (scope === "chrome" && !isChromeGlyph(cell.outText)) continue;
 
 				const phase = fieldPhase(field, cell.col, y);
 				let col = sampleRamp(ramp, phase);
@@ -296,7 +316,7 @@ export class RainbowEngine {
 				// Background: tint every cell that does not already carry its
 				// own colour. Tinting only the empty cells leaves every word
 				// sitting in an untinted dark box, which looks like a bug.
-				if (s.colorBackground && cell.bgCode === null) {
+				if (paintBg && cell.bgCode === null) {
 					cell.outBg = mixRgb(this.bg, col, 0.17 * blend);
 					row.dirty = true;
 				}
@@ -304,8 +324,11 @@ export class RainbowEngine {
 				// Foreground: only cells that actually have ink.
 				if (s.colorText && !cell.blank) {
 					const dimmed = s.preserveDim && cell.style.dim;
-					const amount = dimmed ? blend * 0.4 : blend;
+					// Separator rules are the clearest gradient carrier on the
+					// screen, so give them the palette undiluted.
+					const amount = isRule ? 1 : dimmed ? blend * 0.4 : blend;
 					cell.outFg = mixRgb(cell.fg ?? this.fg, col, amount);
+					if (isRule) cell.outBold = true;
 					row.dirty = true;
 				}
 			}

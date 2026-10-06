@@ -21,6 +21,7 @@ import {
 	type RainbowSettings,
 	saveSettings,
 } from "./settings.js";
+import { SCOPES } from "./layout.js";
 import { showRainbowSettingsDialog } from "./settings-dialog.js";
 import { showRainbowSplash } from "./splash.js";
 import { RainbowTuiHook } from "./tui-hook.js";
@@ -76,7 +77,7 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
 			: theme.fg("dim", "◇ rainbow off");
 		const detail = theme.fg(
 			"dim",
-			` ${preset?.id ?? settings.preset} · ${settings.mode}/${settings.motion} · ${fxCount}fx` +
+			` ${preset?.id ?? settings.preset} · ${settings.scope} · ${settings.mode}/${settings.motion} · ${fxCount}fx` +
 				(hook.fps > 0 ? ` · ${hook.fps}fps` : " · static") +
 				(frameMs > 0.1 ? ` · ${frameMs.toFixed(1)}ms` : ""),
 		);
@@ -286,6 +287,28 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
 			if (field) apply(c, { mode: field.id as GradientMode }, `Field: ${field.id}`);
 			else if (motion) apply(c, { motion: motion.id as MotionMode }, `Motion: ${motion.id}`);
 			else c.ui.notify(`Unknown mode "${q}". Try /rainbow-mode list`, "error");
+		},
+	});
+
+	pi.registerCommand("rainbow-scope", {
+		description: "Where the colour lands: screen | panels | chrome | text",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const q = args.trim().toLowerCase();
+			if (!q || q === "list") {
+				const text = SCOPES.map(
+					(s) => `  ${s.id === settings.scope ? "▸" : " "} ${s.id.padEnd(8)} ${s.blurb}`,
+				).join("\n");
+				c.ui.notify(`scope is "${settings.scope}"\n${text}`, "info");
+				return;
+			}
+			const scope = SCOPES.find((s) => s.id === q);
+			if (!scope) {
+				c.ui.notify(`Unknown scope "${q}". Try /rainbow-scope list`, "error");
+				return;
+			}
+			apply(c, { scope: scope.id }, `Scope: ${scope.id} — ${scope.blurb}`);
 		},
 	});
 

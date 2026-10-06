@@ -2,7 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { type GradientMode, type MotionMode } from "./field.js";
+import { GRADIENT_MODES, type GradientMode, MOTION_MODES, type MotionMode } from "./field.js";
+import { type RainbowScope, SCOPES } from "./layout.js";
 import { fxIds, getFx } from "./fx.js";
 import { DEFAULT_PRESET, hasPreset } from "./presets.js";
 
@@ -20,6 +21,8 @@ export type RainbowSettings = {
 	presetCycle: number;
 
 	/* gradient field */
+	/** How much of the screen the rainbow is allowed to touch. */
+	scope: RainbowScope;
 	mode: GradientMode;
 	motion: MotionMode;
 	/** Palette cycles per second. */
@@ -95,6 +98,7 @@ export const DEFAULT_SETTINGS: RainbowSettings = {
 	presetFade: 0.8,
 	presetCycle: 0,
 
+	scope: "panels",
 	mode: "diagonal",
 	motion: "scroll",
 	speed: 0.12,
@@ -154,6 +158,7 @@ const GRADIENT_SET = new Set<GradientMode>([
 ]);
 
 const MOTION_SET = new Set<MotionMode>(["scroll", "pulse", "wave", "orbit", "jitter", "breathe", "drift", "none"]);
+const SCOPE_SET = new Set<RainbowScope>(SCOPES.map((s) => s.id));
 
 function normalizeFx(value: unknown): Record<string, number> {
 	const out: Record<string, number> = {};
@@ -177,6 +182,7 @@ export function normalizeSettings(value: Partial<RainbowSettings> | undefined): 
 		presetFade: clamp(num(value?.presetFade, d.presetFade), 0, 5),
 		presetCycle: clamp(num(value?.presetCycle, d.presetCycle), 0, 3600),
 
+		scope: SCOPE_SET.has(value?.scope as RainbowScope) ? (value!.scope as RainbowScope) : d.scope,
 		mode: GRADIENT_SET.has(value?.mode as GradientMode) ? (value!.mode as GradientMode) : d.mode,
 		motion: MOTION_SET.has(value?.motion as MotionMode) ? (value!.motion as MotionMode) : d.motion,
 		speed: clamp(num(value?.speed, d.speed), 0, 3),

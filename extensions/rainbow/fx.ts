@@ -87,7 +87,9 @@ export function draw(
 	fg: RGB | null,
 	bg?: RGB | null,
 ): boolean {
-	if (!cell || cell.claimed) return false;
+	// `quiet` rows take the gradient but no effects: a one-line editor or a
+	// footer is too thin for particles, which read as noise rather than weather.
+	if (!cell || cell.claimed || row.quiet) return false;
 	if (ch.length > 0 && cell.width === 1) cell.outText = ch;
 	if (fg !== undefined) cell.outFg = fg;
 	if (bg !== undefined) cell.outBg = bg;

@@ -30,7 +30,7 @@ const rgb = (r: number, g: number, b: number): RGB => ({ r, g, b });
 function eachCell(frame: Frame, fn: (cell: FrameCell, row: FrameRow, x: number, y: number) => void): void {
 	for (let y = 0; y < frame.rows.length; y++) {
 		const row = frame.rows[y]!;
-		if (row.skip) continue;
+		if (row.skip || row.quiet) continue;
 		const cells = row.cells;
 		for (let i = 0; i < cells.length; i++) fn(cells[i]!, row, cells[i]!.col, y);
 	}
