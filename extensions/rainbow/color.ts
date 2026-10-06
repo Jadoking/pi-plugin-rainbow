@@ -358,3 +358,18 @@ export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
 	}
 	return best;
 }
+
+/**
+ * Compress a colour's lightness into a band, keeping hue and chroma.
+ *
+ * Structural lines have a different requirement from text. Text must clear a
+ * contrast ratio; a rule must simply never disappear. Painted with a ramp at
+ * full range, a rule drops to near-black wherever the palette darkens and the
+ * line reads as dashed or broken rather than as a gradient. Remapping lightness
+ * into a band keeps the sweep and the relative shading while guaranteeing the
+ * line stays drawn along its whole length.
+ */
+export function bandLightness(c: RGB, lo: number, hi: number): RGB {
+	const { L, C, h } = rgbToOklch(c);
+	return oklchToRgb({ L: lo + clamp01(L) * (hi - lo), C, h });
+}

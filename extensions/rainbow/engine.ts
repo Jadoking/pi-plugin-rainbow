@@ -6,6 +6,7 @@
  */
 
 import {
+	bandLightness,
 	blendRamps,
 	clamp01,
 	ensureContrast,
@@ -49,6 +50,16 @@ const DEFAULT_FG: RGB = { r: 215, g: 218, b: 226 };
 /**
  * Glyphs exempt from the contrast floor: they are texture, not text.
  */
+/**
+ * Lightness band for structural rules, in OKLab terms.
+ *
+ * The floor is what stops a rule vanishing into a dark stretch of the palette;
+ * the ceiling stops a pale palette turning a hairline into a glare line that
+ * competes with the text above it.
+ */
+const RULE_L_MIN = 0.44;
+const RULE_L_MAX = 0.82;
+
 const DECOR_GLYPHS = new Set(
 	" \u2591\u2592\u2593\u2588\u2580\u2584\u258c\u2590\u00b7\u2219\u2022\u25e6\u00b0\u22c5" +
 		"\u2502\u2503\u2551\u258f\u258e\u258d\u258b\u258a\u2589" +
@@ -432,7 +443,17 @@ export class RainbowEngine {
 									? blend * 0.4
 									: blend;
 					cell.outFg = mixRgb(cell.fg ?? this.fg, col, amount);
-					if (isRule) cell.outBold = true;
+					if (isRule) {
+						// Keep the line drawn along its whole length. Without
+						// this the ramp's dark end erases whole stretches of the
+						// rule and it reads as dashed rather than as a gradient.
+						cell.outFg = bandLightness(cell.outFg, RULE_L_MIN, RULE_L_MAX);
+						// No bold. It was compensating for rules disappearing
+						// into dark palette stretches, which the lightness band
+						// now handles properly; left on, it thickens a hairline
+						// into something that competes with the text.
+						cell.outBold = false;
+					}
 					row.dirty = true;
 				}
 			}
