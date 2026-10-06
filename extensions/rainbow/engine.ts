@@ -301,7 +301,21 @@ export class RainbowEngine {
 			if (row.skip) continue;
 			const isRule = layout.rowRule[y] === true;
 			const inBox = layout.rowBox[y] === true;
+
 			const cells = row.cells;
+			// A box or a footer strip is a UI element, not a canvas. Sampling
+			// the field per cell works on open screen, but inside a filled block
+			// a turbulent field becomes a mosaic that buries the text. One
+			// colour per row keeps the element coherent while still letting the
+			// gradient travel down it.
+			const coherent = inBox || row.quiet;
+			let boxCol: RGB | null = null;
+			if (coherent) {
+				const mid = cells.length > 0 ? cells[cells.length >> 1]!.col : 0;
+				boxCol = sampleRamp(ramp, fieldPhase(field, mid, y));
+				if (vib !== 1) boxCol = saturate(boxCol, vib);
+				if (bright !== 0) boxCol = shade(boxCol, bright);
+			}
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i]!;
 				if (cell.style.inverse) continue;
@@ -318,14 +332,14 @@ export class RainbowEngine {
 				// own colour. Tinting only the empty cells leaves every word
 				// sitting in an untinted dark box, which looks like a bug.
 				if (paintBg && cell.bgCode === null) {
-					cell.outBg = mixRgb(this.bg, col, 0.17 * blend);
+					cell.outBg = mixRgb(this.bg, boxCol ?? col, 0.17 * blend);
 					row.dirty = true;
-				} else if (paintBg && inBox) {
+				} else if (paintBg && inBox && boxCol) {
 					// pi fills tool calls and messages with a flat theme colour.
 					// Leaving those alone was what made the rainbow look like it
 					// stopped at the edge of every box; pulling them towards the
 					// ramp is what makes a block read as part of the gradient.
-					cell.outBg = mixRgb(effectiveBg(cell, this.bg), col, 0.38 * blend);
+					cell.outBg = mixRgb(effectiveBg(cell, this.bg), boxCol, 0.38 * blend);
 					row.dirty = true;
 				}
 
@@ -334,7 +348,10 @@ export class RainbowEngine {
 					const dimmed = s.preserveDim && cell.style.dim;
 					// Separator rules are the clearest gradient carrier on the
 					// screen, so give them the palette undiluted.
-					const amount = isRule ? 1 : dimmed ? blend * 0.4 : blend;
+					// Inside a box pi has already colour-coded the text (command
+					// vs output vs timing). Overriding that at full strength
+					// throws away information, so the ramp only leans on it.
+					const amount = isRule ? 1 : inBox ? blend * 0.45 : dimmed ? blend * 0.4 : blend;
 					cell.outFg = mixRgb(cell.fg ?? this.fg, col, amount);
 					if (isRule) cell.outBold = true;
 					row.dirty = true;
