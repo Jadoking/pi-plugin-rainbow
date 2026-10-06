@@ -7,7 +7,7 @@
 
 import { blendRamps, clamp01, mixRgb, type Ramp, type RGB, sampleRamp, saturate, shade } from "./color.js";
 import { type FieldState, fieldPhase, makeFieldState } from "./field.js";
-import { buildFrame, emitFrame, type Frame } from "./frame.js";
+import { buildFrame, effectiveBg, emitFrame, type Frame } from "./frame.js";
 import { allFx, type FxContext, type FxEvent, type FxLayer, type FxTuning, makeRng } from "./fx.js";
 import "./fx-particles.js";
 import "./fx-post.js";
@@ -300,6 +300,7 @@ export class RainbowEngine {
 			const row = frame.rows[y]!;
 			if (row.skip) continue;
 			const isRule = layout.rowRule[y] === true;
+			const inBox = layout.rowBox[y] === true;
 			const cells = row.cells;
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i]!;
@@ -318,6 +319,13 @@ export class RainbowEngine {
 				// sitting in an untinted dark box, which looks like a bug.
 				if (paintBg && cell.bgCode === null) {
 					cell.outBg = mixRgb(this.bg, col, 0.17 * blend);
+					row.dirty = true;
+				} else if (paintBg && inBox) {
+					// pi fills tool calls and messages with a flat theme colour.
+					// Leaving those alone was what made the rainbow look like it
+					// stopped at the edge of every box; pulling them towards the
+					// ramp is what makes a block read as part of the gradient.
+					cell.outBg = mixRgb(effectiveBg(cell, this.bg), col, 0.38 * blend);
 					row.dirty = true;
 				}
 

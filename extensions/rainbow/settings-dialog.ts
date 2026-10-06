@@ -1,376 +1,353 @@
-import type { ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+/**
+ * The live settings dialog.
+ *
+ * Every change is applied to the running session the moment it is made, so the
+ * screen behind the overlay is the preview: there is no "apply" step, and no
+ * way to be looking at a setting that is not actually in effect.
+ */
 
-import { createRainbowMotion, getRainbowColor, phaseAt } from "./motion.js";
-import { getNextRainbowPresetId, getPreviousRainbowPresetId, getRainbowPreset } from "./presets.js";
-import { noteRainbowRenderTrigger } from "./render-debug.js";
-import { DEFAULT_SETTINGS, type RainbowSettings, type RainbowSettingsStore } from "./settings.js";
-import { getEffectiveAnimationSpeed } from "./terminal.js";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-type ToggleField = "enabled" | "fg" | "colorInput" | "colorToolBoxes" | "animateToolBoxes" | "animateInTmux" | "showStatus";
-type NumberField = "speed" | "turns";
-type PresetField = "preset";
-type Field = ToggleField | NumberField | PresetField;
+import { type RGB, sampleRamp } from "./color.js";
+import { GRADIENT_MODES, type GradientMode, MOTION_MODES, type MotionMode } from "./field.js";
+import { allFx } from "./fx.js";
+import { SCOPES } from "./layout.js";
+import { findPreset, nextPresetId, presetIds, prevPresetId, rampFor } from "./presets.js";
+import type { RainbowSettings } from "./settings.js";
 
-type RowBase = {
-  key: Field;
-  title: string;
+type Theme = { fg: (role: string, text: string) => string; bold: (text: string) => string };
+
+type DialogCtx = {
+	ui: {
+		custom: <T>(
+			factory: (
+				tui: { requestRender: () => void },
+				theme: Theme,
+				keybindings: unknown,
+				done: (result: T) => void,
+			) => {
+				render: (width: number) => string[];
+				handleInput?: (data: string) => void;
+				invalidate?: () => void;
+				dispose?: () => void;
+			},
+			options?: { overlay?: boolean },
+		) => Promise<T>;
+	};
 };
 
-type ToggleRow = RowBase & {
-  kind: "toggle";
-  description: string;
+const RESET = "\u001b[0m";
+const ink = (c: RGB, s: string) => `\u001b[38;2;${c.r};${c.g};${c.b}m${s}${RESET}`;
+
+type Row =
+	| { kind: "header"; label: string }
+	| {
+			kind: "field";
+			label: string;
+			/** Rendered to the right of the label. */
+			read: (s: RainbowSettings, theme: Theme) => string;
+			/** dir is -1 or +1; returns the patch to apply, or {} for a no-op. */
+			step: (s: RainbowSettings, dir: number) => Partial<RainbowSettings>;
+			hint: string;
+	  };
+
+/** Clamp and round, so repeated steps never drift into float noise. */
+const num = (v: number, lo: number, hi: number, places = 2): number => {
+	const p = 10 ** places;
+	return Math.round(Math.min(hi, Math.max(lo, v)) * p) / p;
 };
 
-type NumberRow = RowBase & {
-  kind: "number";
-  description: string;
-  step: number;
-  min: number;
-  max: number;
-  digits: number;
-};
-
-type PresetRow = RowBase & {
-  kind: "preset";
-};
-
-type Row = ToggleRow | NumberRow | PresetRow;
-
-type RequestRender = () => void;
-
-const ROWS: Row[] = [
-  {
-    key: "enabled",
-    title: "Plugin enabled",
-    description: "Master switch for the palette-driven effect",
-    kind: "toggle",
-  },
-  {
-    key: "fg",
-    title: "Foreground effect",
-    description: "Colorize the rainbow editor, assistant text, and prompt outlines",
-    kind: "toggle",
-  },
-  {
-    key: "colorInput",
-    title: "Color typed input",
-    description: "Animate only the prompt entry area in the editor.",
-    kind: "toggle",
-  },
-  {
-    key: "animateInTmux",
-    title: "Animate in tmux",
-    description: "Keep live animation enabled inside tmux. Off by default because multiplexed redraws can jitter.",
-    kind: "toggle",
-  },
-  {
-    key: "showStatus",
-    title: "Footer status",
-    description: "Show or hide the active preset in Pi's footer",
-    kind: "toggle",
-  },
-  {
-    key: "preset",
-    title: "Palette preset",
-    kind: "preset",
-  },
-  {
-    key: "speed",
-    title: "Animation speed",
-    description: "Only animates while Pi is actively working; idle state stays on the base palette",
-    kind: "number",
-    step: 0.001,
-    min: 0,
-    max: 0.03,
-    digits: 3,
-  },
-  {
-    key: "turns",
-    title: "Band count",
-    description: "Controls how many diagonal color bands span the themed gradient",
-    kind: "number",
-    step: 0.25,
-    min: 0.25,
-    max: 8,
-    digits: 2,
-  },
-];
-
-const RESET = "\x1b[0m";
-const PREVIEW_BAR_CHAR = "█";
-const PREVIEW_TEXT = " PI RAINBOW PREVIEW ";
-
-const clamp = (value: number, min: number, max: number) => {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-};
-
-const fgCode = (r: number, g: number, b: number) => {
-  return `\x1b[38;2;${r};${g};${b}m`;
-};
-
-const colorizePreviewLine = (text: string, row: number, settings: RainbowSettings, elapsedMs: number) => {
-  const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
-  const motion = createRainbowMotion(Math.max(1, visibleWidth(text)), 2, settings.turns, effectiveSpeed > 0 ? elapsedMs : 0, effectiveSpeed);
-  let result = "";
-  let column = 0;
-
-  for (const char of Array.from(text)) {
-    const width = visibleWidth(char);
-    if (width === 0) {
-      result += char;
-      continue;
-    }
-
-    if (char === " ") {
-      result += char;
-      column += width;
-      continue;
-    }
-
-    const phase = phaseAt(motion, row, column);
-    const color = getRainbowColor(phase, settings.preset);
-    result += `${fgCode(color.r, color.g, color.b)}${char}${RESET}`;
-    column += width;
-  }
-
-  return result;
-};
-
-export const renderPresetPreview = (presetId: string) => {
-  return getRainbowPreset(presetId).colors.map((color) => `${fgCode(color.r, color.g, color.b)}██${RESET}`).join(" ");
-};
-
-export const renderAnimationPreview = (settings: RainbowSettings, width: number, elapsedMs: number) => {
-  const contentWidth = Math.max(12, width);
-  const previewText = PREVIEW_TEXT.repeat(Math.ceil(contentWidth / PREVIEW_TEXT.length)).slice(0, contentWidth);
-  const previewBar = PREVIEW_BAR_CHAR.repeat(contentWidth);
-
-  return [
-    colorizePreviewLine(previewBar, 0, settings, elapsedMs),
-    colorizePreviewLine(previewText, 1, settings, elapsedMs),
-  ];
-};
-
-const formatValue = (settings: RainbowSettings, row: Row) => {
-  if (row.kind === "toggle") {
-    return settings[row.key] ? "ON" : "OFF";
-  }
-
-  if (row.kind === "preset") {
-    return getRainbowPreset(settings.preset).name;
-  }
-
-  return settings[row.key as NumberField].toFixed(row.digits);
-};
-
-const describeRow = (settings: RainbowSettings, row: Row) => {
-  if (row.kind === "preset") {
-    return getRainbowPreset(settings.preset).description;
-  }
-
-  return row.description;
-};
-
-const pad = (text: string, width: number) => {
-  return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
-};
-
-const wrapRowContent = (content: string, width: number) => {
-  return wrapTextWithAnsi(content, Math.max(1, width));
-};
-
-export class RainbowSettingsDialog {
-  readonly width = 92;
-
-  private selected = 0;
-  private value: RainbowSettings;
-  private previewTimer: ReturnType<typeof setInterval> | undefined;
-
-  constructor(
-    private readonly theme: Theme,
-    initial: RainbowSettings,
-    private readonly onChange: (next: RainbowSettings) => void,
-    private readonly done: () => void,
-    private readonly requestRender?: RequestRender,
-    private readonly now: () => number = () => Date.now(),
-  ) {
-    this.value = initial;
-    this.syncPreviewTimer();
-  }
-
-  dispose() {
-    this.stopPreviewTimer();
-  }
-
-  handleInput(data: string) {
-    const current = ROWS[this.selected];
-    if (!current) return;
-
-    if (matchesKey(data, Key.escape)) {
-      this.done();
-      return;
-    }
-
-    if (matchesKey(data, Key.up)) {
-      this.selected = Math.max(0, this.selected - 1);
-      return;
-    }
-
-    if (matchesKey(data, Key.down)) {
-      this.selected = Math.min(ROWS.length - 1, this.selected + 1);
-      return;
-    }
-
-    if (data.toLowerCase() === "r") {
-      this.apply({ ...DEFAULT_SETTINGS });
-      return;
-    }
-
-    if (current.kind === "toggle") {
-      if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
-        this.apply({
-          ...this.value,
-          [current.key]: !this.value[current.key],
-        });
-      }
-      return;
-    }
-
-    if (current.kind === "preset") {
-      if (matchesKey(data, Key.left)) {
-        this.cyclePreset(-1);
-        return;
-      }
-
-      if (matchesKey(data, Key.right) || matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
-        this.cyclePreset(1);
-      }
-      return;
-    }
-
-    if (matchesKey(data, Key.left)) {
-      this.adjust(current, -1);
-      return;
-    }
-
-    if (matchesKey(data, Key.right) || matchesKey(data, Key.enter)) {
-      this.adjust(current, 1);
-    }
-  }
-
-  invalidate() {}
-
-  render(width: number) {
-    const innerWidth = Math.max(24, Math.min(this.width, width) - 2);
-    const previewWidth = Math.max(12, innerWidth - 4);
-    const previewElapsedMs = 0;
-    const lines: string[] = [];
-    const border = this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`);
-    const footer = this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
-    const row = (content = "") => {
-      lines.push(this.theme.fg("border", "│") + pad(content, innerWidth) + this.theme.fg("border", "│"));
-    };
-    const wrappedRow = (content: string) => {
-      for (const line of wrapRowContent(content, innerWidth)) {
-        row(line);
-      }
-    };
-    const wrappedIndentedRow = (indent: string, content: string) => {
-      const availableWidth = Math.max(1, innerWidth - visibleWidth(indent));
-      const wrapped = wrapRowContent(content, availableWidth);
-      if (wrapped.length === 0) {
-        row(indent);
-        return;
-      }
-      for (const line of wrapped) {
-        row(indent + line);
-      }
-    };
-
-    lines.push(border);
-    wrappedRow(`${this.theme.bold(this.theme.fg("accent", "Rainbow Theme Settings"))}`);
-    wrappedRow(this.theme.fg("muted", "Preset-driven color theming for Pi"));
-    row();
-    wrappedRow(this.theme.fg("dim", "Animation preview"));
-    for (const previewLine of renderAnimationPreview(this.value, previewWidth, previewElapsedMs)) {
-      row("  " + previewLine);
-    }
-    row();
-
-    for (let index = 0; index < ROWS.length; index += 1) {
-      const item = ROWS[index]!;
-      const selected = index === this.selected;
-      const prefix = selected ? this.theme.fg("accent", "▶ ") : "  ";
-      const title = selected ? this.theme.fg("accent", item.title) : this.theme.fg("text", item.title);
-      const value = selected
-        ? this.theme.fg("accent", formatValue(this.value, item))
-        : this.theme.fg("muted", formatValue(this.value, item));
-      const space = Math.max(1, innerWidth - visibleWidth(prefix + title) - visibleWidth(value));
-
-      row(prefix + title + " ".repeat(space) + value);
-      wrappedIndentedRow("    ", this.theme.fg("muted", describeRow(this.value, item)));
-      if (item.kind === "preset") {
-        wrappedIndentedRow("    ", this.theme.fg("dim", "Palette ") + renderPresetPreview(this.value.preset));
-      }
-    }
-
-    row();
-    wrappedRow(this.theme.fg("dim", "↑↓ move  left/right adjust  Enter/Space toggle or cycle  r reset  Esc close"));
-    lines.push(footer);
-
-    return lines.map((line) => truncateToWidth(line, width));
-  }
-
-  private syncPreviewTimer() {
-    this.stopPreviewTimer();
-  }
-
-  private stopPreviewTimer() {
-    if (!this.previewTimer) return;
-    clearInterval(this.previewTimer);
-    this.previewTimer = undefined;
-  }
-
-  private cyclePreset(direction: -1 | 1) {
-    this.apply({
-      ...this.value,
-      preset:
-        direction > 0
-          ? getNextRainbowPresetId(this.value.preset)
-          : getPreviousRainbowPresetId(this.value.preset),
-    });
-  }
-
-  private adjust(row: NumberRow, direction: -1 | 1) {
-    const current = this.value[row.key as NumberField];
-    const next = Number(clamp(current + row.step * direction, row.min, row.max).toFixed(row.digits));
-    this.apply({
-      ...this.value,
-      [row.key]: next,
-    });
-  }
-
-  private apply(next: RainbowSettings) {
-    this.value = next;
-    this.syncPreviewTimer();
-    this.onChange(next);
-    noteRainbowRenderTrigger("settings-apply");
-    this.requestRender?.();
-  }
+function cycle<T>(list: readonly T[], current: T, dir: number): T {
+	const i = list.indexOf(current);
+	const n = list.length;
+	return list[((i < 0 ? 0 : i) + dir + n) % n]!;
 }
 
-export const showRainbowSettingsDialog = async (
-  ctx: ExtensionCommandContext,
-  store: RainbowSettingsStore,
-  onChange: (next: RainbowSettings) => void,
-) => {
-  await ctx.ui.custom<void>(
-    (tui, theme, _keybindings, done) => {
-      return new RainbowSettingsDialog(theme, store.get(), onChange, done, () => tui.requestRender());
-    },
-    { overlay: true },
-  );
-};
+function slider(theme: Theme, value: number, lo: number, hi: number, width = 10): string {
+	const t = hi === lo ? 0 : (value - lo) / (hi - lo);
+	const filled = Math.round(Math.min(1, Math.max(0, t)) * width);
+	return theme.fg("dim", "━".repeat(filled) + "·".repeat(width - filled));
+}
+
+function rampBar(preset: string, cells: number): string {
+	const ramp = rampFor(preset);
+	let out = "";
+	for (let i = 0; i < cells; i++) out += ink(sampleRamp(ramp, i / cells), "█");
+	return out;
+}
+
+function buildRows(): Row[] {
+	const gradientIds = GRADIENT_MODES.map((m) => m.id as GradientMode);
+	const motionIds = MOTION_MODES.map((m) => m.id as MotionMode);
+	const scopeIds = SCOPES.map((s) => s.id);
+	const fxCount = allFx().length;
+
+	return [
+		{ kind: "header", label: "what and where" },
+		{
+			kind: "field",
+			label: "enabled",
+			read: (s, t) => (s.enabled ? t.fg("success", "on") : t.fg("muted", "off")),
+			step: (s) => ({ enabled: !s.enabled }),
+			hint: "master switch",
+		},
+		{
+			kind: "field",
+			label: "scope",
+			read: (s) => s.scope,
+			step: (s, d) => ({ scope: cycle(scopeIds, s.scope, d) }),
+			hint: "where the colour lands",
+		},
+		{
+			kind: "field",
+			label: "palette",
+			read: (s, t) => {
+				const p = findPreset(s.preset);
+				const n = presetIds().indexOf(p?.id ?? s.preset) + 1;
+				return `${rampBar(s.preset, 14)} ${p?.name ?? s.preset} ${t.fg("dim", `${n}/${presetIds().length}`)}`;
+			},
+			step: (s, d) => ({ preset: d > 0 ? nextPresetId(s.preset) : prevPresetId(s.preset) }),
+			hint: "colour ramp",
+		},
+
+		{ kind: "header", label: "gradient" },
+		{
+			kind: "field",
+			label: "field",
+			read: (s) => s.mode,
+			step: (s, d) => ({ mode: cycle(gradientIds, s.mode, d) }),
+			hint: `${gradientIds.length} gradient shapes`,
+		},
+		{
+			kind: "field",
+			label: "motion",
+			read: (s) => s.motion,
+			step: (s, d) => ({ motion: cycle(motionIds, s.motion, d) }),
+			hint: `${motionIds.length} ways to move`,
+		},
+		{
+			kind: "field",
+			label: "speed",
+			read: (s, t) => `${slider(t, s.speed, 0, 1)} ${s.speed.toFixed(2)}`,
+			step: (s, d) => ({ speed: num(s.speed + d * 0.02, 0, 1) }),
+			hint: "palette cycles per second",
+		},
+		{
+			kind: "field",
+			label: "turns",
+			read: (s, t) => `${slider(t, s.turns, 0.25, 8)} ${s.turns.toFixed(2)}`,
+			step: (s, d) => ({ turns: num(s.turns + d * 0.25, 0.25, 8) }),
+			hint: "bands across the screen",
+		},
+		{
+			kind: "field",
+			label: "angle",
+			read: (s, t) => `${slider(t, s.angle, 0, 359)} ${Math.round(s.angle)}°`,
+			step: (s, d) => ({ angle: num((s.angle + d * 15 + 360) % 360, 0, 359, 0) }),
+			hint: "gradient rotation",
+		},
+
+		{ kind: "header", label: "colour" },
+		{
+			kind: "field",
+			label: "blend",
+			read: (s, t) => `${slider(t, s.blend, 0, 1)} ${s.blend.toFixed(2)}`,
+			step: (s, d) => ({ blend: num(s.blend + d * 0.05, 0, 1) }),
+			hint: "how far from the original colours",
+		},
+		{
+			kind: "field",
+			label: "vibrance",
+			read: (s, t) => `${slider(t, s.vibrance, 0, 2)} ${s.vibrance.toFixed(2)}`,
+			step: (s, d) => ({ vibrance: num(s.vibrance + d * 0.05, 0, 2) }),
+			hint: "chroma multiplier",
+		},
+		{
+			kind: "field",
+			label: "brightness",
+			read: (s, t) => `${slider(t, s.brightness, -1, 1)} ${s.brightness.toFixed(2)}`,
+			step: (s, d) => ({ brightness: num(s.brightness + d * 0.05, -1, 1) }),
+			hint: "lightness shift",
+		},
+		{
+			kind: "field",
+			label: "text",
+			read: (s, t) => (s.colorText ? t.fg("success", "on") : t.fg("muted", "off")),
+			step: (s) => ({ colorText: !s.colorText }),
+			hint: "colour glyphs",
+		},
+		{
+			kind: "field",
+			label: "background",
+			read: (s, t) => (s.colorBackground ? t.fg("success", "on") : t.fg("muted", "off")),
+			step: (s) => ({ colorBackground: !s.colorBackground }),
+			hint: "tint cell backgrounds",
+		},
+
+		{ kind: "header", label: "effects and budget" },
+		{
+			kind: "field",
+			label: "effects",
+			read: (s, t) => {
+				const on = Object.entries(s.fx)
+					.filter(([, v]) => v > 0)
+					.map(([k]) => k);
+				if (!on.length) return t.fg("muted", `none of ${fxCount}`);
+				const shown = on.slice(0, 4).join(" ");
+				return `${shown}${on.length > 4 ? t.fg("dim", ` +${on.length - 4}`) : ""}`;
+			},
+			step: () => ({}),
+			hint: "set with /rainbow-fx",
+		},
+		{
+			kind: "field",
+			label: "chaos",
+			read: (s, t) => `${slider(t, s.chaos, 0, 1)} ${s.chaos.toFixed(2)}`,
+			step: (s, d) => ({ chaos: num(s.chaos + d * 0.05, 0, 1) }),
+			hint: "effect intensity multiplier",
+		},
+		{
+			kind: "field",
+			label: "fps",
+			read: (s, t) => `${slider(t, s.fps, 1, 60)} ${s.fps}`,
+			step: (s, d) => ({ fps: num(s.fps + d * 2, 1, 60, 0) }),
+			hint: "animation rate",
+		},
+		{
+			kind: "field",
+			label: "reduced motion",
+			read: (s, t) => (s.reducedMotion ? t.fg("success", "on") : t.fg("muted", "off")),
+			step: (s) => ({ reducedMotion: !s.reducedMotion }),
+			hint: "calm everything down",
+		},
+		{
+			kind: "field",
+			label: "footer status",
+			read: (s, t) => (s.showStatus ? t.fg("success", "on") : t.fg("muted", "off")),
+			step: (s) => ({ showStatus: !s.showStatus }),
+			hint: "show state in pi's footer",
+		},
+	];
+}
+
+export async function showRainbowSettingsDialog(
+	ctx: unknown,
+	initial: RainbowSettings,
+	onChange: (patch: Partial<RainbowSettings>) => void,
+): Promise<void> {
+	const c = ctx as DialogCtx;
+	if (typeof c?.ui?.custom !== "function") return;
+
+	const rows = buildRows();
+	const fieldIdx = rows.map((r, i) => (r.kind === "field" ? i : -1)).filter((i) => i >= 0);
+	let cursor = fieldIdx[0] ?? 0;
+	let current: RainbowSettings = { ...initial };
+
+	await c.ui.custom<void>(
+		(tui, theme, _kb, done) => {
+			let closed = false;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				done();
+			};
+
+			const move = (dir: number) => {
+				const at = fieldIdx.indexOf(cursor);
+				const next = fieldIdx[(at + dir + fieldIdx.length) % fieldIdx.length];
+				if (next !== undefined) cursor = next;
+				tui.requestRender();
+			};
+
+			const adjust = (dir: number) => {
+				const row = rows[cursor];
+				if (!row || row.kind !== "field") return;
+				const patch = row.step(current, dir);
+				if (Object.keys(patch).length === 0) return;
+				current = { ...current, ...patch };
+				onChange(patch);
+				tui.requestRender();
+			};
+
+			return {
+				invalidate() {},
+
+				render(width: number): string[] {
+					const inner = Math.max(40, Math.min(width, 88) - 2);
+					const out: string[] = [];
+					const border = (s: string) => theme.fg("border", s);
+					const line = (content = "") => {
+						const padding = Math.max(0, inner - visibleWidth(content));
+						out.push(`${border("│")}${content}${" ".repeat(padding)}${border("│")}`);
+					};
+
+					out.push(border(`╭${"─".repeat(inner)}╮`));
+					line(` ${theme.bold(theme.fg("accent", "rainbow"))} ${theme.fg("muted", "— changes apply live")}`);
+					line(` ${rampBar(current.preset, inner - 2)}`);
+					line();
+
+					for (let i = 0; i < rows.length; i++) {
+						const row = rows[i]!;
+						if (row.kind === "header") {
+							line(` ${theme.fg("dim", row.label)}`);
+							continue;
+						}
+						const on = i === cursor;
+						const marker = on ? theme.fg("accent", "▸") : " ";
+						const label = on
+							? theme.fg("accent", row.label.padEnd(15))
+							: theme.fg("text", row.label.padEnd(15));
+						const value = row.read(current, theme);
+						const left = ` ${marker} ${label} ${value}`;
+						const hint = on ? theme.fg("muted", row.hint) : "";
+						const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(hint) - 1);
+						line(`${left}${" ".repeat(gap)}${hint} `);
+					}
+
+					line();
+					line(
+						` ${theme.fg("dim", "↑↓ field   ←→ adjust   space toggle   r reset   esc close")}`,
+					);
+					out.push(border(`╰${"─".repeat(inner)}╯`));
+
+					return out.map((l) => truncateToWidth(l, width));
+				},
+
+				handleInput(data: string) {
+					if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+						close();
+						return;
+					}
+					if (matchesKey(data, Key.up)) return move(-1);
+					if (matchesKey(data, Key.down)) return move(1);
+					if (matchesKey(data, Key.left)) return adjust(-1);
+					if (matchesKey(data, Key.right) || matchesKey(data, Key.space)) return adjust(1);
+					if (data.toLowerCase() === "r") {
+						// Reset only touches what this dialog edits; effects are
+						// owned by /rainbow-fx and should survive.
+						const patch: Partial<RainbowSettings> = {
+							scope: initial.scope,
+							preset: initial.preset,
+							mode: initial.mode,
+							motion: initial.motion,
+							speed: initial.speed,
+							turns: initial.turns,
+							angle: initial.angle,
+							blend: initial.blend,
+							vibrance: initial.vibrance,
+							brightness: initial.brightness,
+							chaos: initial.chaos,
+							fps: initial.fps,
+						};
+						current = { ...current, ...patch };
+						onChange(patch);
+						tui.requestRender();
+					}
+				},
+
+				dispose: close,
+			};
+		},
+		{ overlay: true },
+	);
+}

@@ -59,6 +59,10 @@ export type Layout = {
 	/** Per-row flag: this row carries box chrome (rule, edge or corner glyphs). */
 	rowChrome: boolean[];
 	ruleRows: number[];
+	/** Rows belonging to a background-filled block (pi's tool calls, messages). */
+	rowBox: boolean[];
+	/** Runs of consecutive box rows. */
+	boxes: { top: number; bottom: number }[];
 };
 
 /**
@@ -77,6 +81,23 @@ function isRuleRow(row: FrameRow): boolean {
 	}
 	if (rule < 8) return false;
 	return rule >= (rule + other) * 0.6;
+}
+
+/**
+ * True when a row is part of a background-filled block.
+ *
+ * This is how pi actually draws the thing people call a "box": a tool call, a
+ * user message or a diff is a run of rows with a theme background colour set,
+ * with no border glyphs anywhere. Detecting it by fill rather than by outline
+ * is the only way to find them.
+ */
+function isBoxRow(row: FrameRow): boolean {
+	let filled = 0;
+	for (const cell of row.cells) {
+		if (cell.style.bgCode !== null) filled++;
+	}
+	// A handful of cells is a syntax highlight; a block is wider than that.
+	return filled >= 6;
 }
 
 function hasChrome(row: FrameRow, isRule: boolean): boolean {
@@ -101,6 +122,7 @@ export function analyzeLayout(frame: Frame): Layout {
 	const rowRule: boolean[] = new Array(n).fill(false);
 	const rowChrome: boolean[] = new Array(n).fill(false);
 	const rowPanel: number[] = new Array(n).fill(-1);
+	const rowBox: boolean[] = new Array(n).fill(false);
 	const ruleRows: number[] = [];
 
 	for (let y = 0; y < n; y++) {
@@ -109,7 +131,17 @@ export function analyzeLayout(frame: Frame): Layout {
 		const rule = isRuleRow(row);
 		rowRule[y] = rule;
 		rowChrome[y] = hasChrome(row, rule);
+		rowBox[y] = isBoxRow(row);
 		if (rule) ruleRows.push(y);
+	}
+
+	// Collapse box rows into runs so a caller can reason about whole blocks.
+	const boxes: { top: number; bottom: number }[] = [];
+	for (let y = 0; y < n; y++) {
+		if (!rowBox[y]) continue;
+		const top = y;
+		while (y + 1 < n && rowBox[y + 1]) y++;
+		boxes.push({ top, bottom: y });
 	}
 
 	const panels: Panel[] = [];
@@ -155,15 +187,16 @@ export function analyzeLayout(frame: Frame): Layout {
 		for (let y = p.top; y <= p.bottom; y++) rowPanel[y] = i;
 	}
 
-	return { panels, rowPanel, rowRule, rowChrome, ruleRows };
+	return { panels, rowPanel, rowRule, rowChrome, ruleRows, rowBox, boxes };
 }
 
 /**
  * How much of the screen the rainbow is allowed to touch.
  *
  * - `screen`  — everything, the old flood-fill behaviour.
- * - `panels`  — pi's chrome only: the separator rules plus the small panels
- *               around them (editor, footer, tool blocks). The transcript keeps
+ * - `panels`  — pi's chrome only: the separator rules, the small panels around
+ *               them (editor, footer), and every background-filled block pi
+ *               draws for a tool call or a message. Plain transcript prose keeps
  *               its own colours, so long output stays readable.
  * - `chrome`  — the separator rules and box glyphs, nothing else.
  * - `text`    — foregrounds everywhere, no backgrounds at all.
@@ -199,6 +232,13 @@ export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 
 		// panels: keep the rules and every non-transcript panel.
 		if (layout.rowRule[y]) continue;
+		// A background-filled block is a "box" even when it sits in the middle
+		// of the transcript, which is exactly where pi puts tool calls. These
+		// are the blocks worth colouring, so they override panel classification.
+		if (layout.rowBox[y]) {
+			row.quiet = true;
+			continue;
+		}
 		const pi = layout.rowPanel[y] ?? -1;
 		const panel = pi >= 0 ? layout.panels[pi] : undefined;
 		if (!panel || panel.kind === "transcript") {
