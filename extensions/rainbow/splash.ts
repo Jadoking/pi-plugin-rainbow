@@ -1,131 +1,110 @@
-import type { ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+/**
+ * The splash overlay — a short, loud "yes, the rainbow is on" animation.
+ *
+ * It renders its banner through a private engine instance rather than the live
+ * one, so the splash looks the same whatever the session's settings happen to
+ * be at the time.
+ */
 
-import {
-  createRainbowMotion,
-  getRainbowColor,
-  phaseAt,
-} from "./motion.js";
-import type { RainbowSettings } from "./settings.js";
-import { getEffectiveAnimationSpeed } from "./terminal.js";
+import { RainbowEngine } from "./engine.js";
+import { DEFAULT_SETTINGS, type RainbowSettings } from "./settings.js";
 
-type SplashContext = {
-  ui: Pick<ExtensionCommandContext["ui"], "custom">;
-};
-
-const RESET = "\x1b[0m";
-const SPLASH_FLASH_STRENGTH = 0.64;
-const ENABLE_SPLASH_ANIMATION = false;
-
-const LOGO = [
-  "██████╗ ██╗",
-  "██╔══██╗██║",
-  "██████╔╝██║",
-  "██╔═══╝ ██║",
-  "██║     ██║",
-  "╚═╝     ╚═╝",
+const BANNER = [
+	"██████╗  █████╗ ██╗███╗   ██╗██████╗  ██████╗ ██╗    ██╗",
+	"██╔══██╗██╔══██╗██║████╗  ██║██╔══██╗██╔═══██╗██║    ██║",
+	"██████╔╝███████║██║██╔██╗ ██║██████╔╝██║   ██║██║ █╗ ██║",
+	"██╔══██╗██╔══██║██║██║╚██╗██║██╔══██╗██║   ██║██║███╗██║",
+	"██║  ██║██║  ██║██║██║ ╚████║██████╔╝╚██████╔╝╚███╔███╔╝",
+	"╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚══╝╚══╝ ",
 ];
 
-const mix = (from: number, to: number, strength: number) => {
-  return Math.round(from + (to - from) * strength);
+type SplashCtx = {
+	hasUI?: boolean;
+	ui: {
+		custom: <T>(
+			factory: (
+				tui: unknown,
+				theme: unknown,
+				keybindings: unknown,
+				done: (result: T) => void,
+			) => {
+				render: (width: number) => string[];
+				handleInput?: (d: string) => void;
+				dispose?: () => void;
+			},
+			options?: { overlay?: boolean },
+		) => Promise<T>;
+	};
 };
 
-const fgCode = (r: number, g: number, b: number) => {
-  return `\x1b[38;2;${r};${g};${b}m`;
-};
+export async function showRainbowSplash(ctx: unknown, settings: RainbowSettings): Promise<void> {
+	const c = ctx as SplashCtx;
+	if (typeof c?.ui?.custom !== "function") return;
 
-const center = (text: string, width: number) => {
-  const gap = Math.max(0, width - visibleWidth(text));
-  const left = Math.floor(gap / 2);
-  const right = gap - left;
-  return " ".repeat(left) + text + " ".repeat(right);
-};
+	const splashSettings: RainbowSettings = {
+		...DEFAULT_SETTINGS,
+		preset: settings.preset,
+		enabled: true,
+		mode: "diagonal",
+		motion: "scroll",
+		speed: 0.5,
+		turns: 1.4,
+		blend: 1,
+		colorText: true,
+		colorBackground: true,
+		fx: { starfield: 0.45, shine: 0.7, bloom: 0.5, neon: 0.6, vignette: 0.4 },
+	};
 
-const colorize = (text: string, elapsedMs: number, row: number, settings: RainbowSettings) => {
-  const chars = Array.from(text);
-  const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
-  const flash = effectiveSpeed > 0 && elapsedMs < 1100 ? 1 - elapsedMs / 1100 : 0;
-  const motionElapsedMs = effectiveSpeed > 0 ? elapsedMs : 0;
-  const motion = createRainbowMotion(chars.length, LOGO.length, settings.turns, motionElapsedMs, effectiveSpeed);
+	const engine = new RainbowEngine(splashSettings);
+	const bannerWidth = Math.max(...BANNER.map((l) => [...l].length));
 
-  return chars
-    .map((char, index) => {
-      if (char === " ") return char;
-      const phase = phaseAt(motion, row, index);
-      const base = getRainbowColor(phase, settings.preset, settings.vibrance);
-      const r = mix(base.r, 255, flash * SPLASH_FLASH_STRENGTH);
-      const g = mix(base.g, 255, flash * SPLASH_FLASH_STRENGTH);
-      const b = mix(base.b, 255, flash * SPLASH_FLASH_STRENGTH);
-      return `${fgCode(r, g, b)}${char}${RESET}`;
-    })
-    .join("");
-};
+	await c.ui.custom<void>(
+		(tui, _theme, _kb, done) => {
+			let closed = false;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				clearInterval(timer);
+				done();
+			};
 
-class RainbowSplash {
-  readonly width = 44;
-  readonly focused = true;
+			const timer = setInterval(() => {
+				(tui as { requestRender?: () => void })?.requestRender?.();
+			}, 50);
+			timer.unref?.();
+			const stopAt = Date.now() + 2800;
 
-  private readonly startedAt = Date.now();
-  private readonly timer: ReturnType<typeof setInterval> | undefined;
+			return {
+				render(width: number): string[] {
+					if (Date.now() > stopAt) {
+						// Resolve on the next tick: never call done() mid-render.
+						setTimeout(close, 0);
+					}
+					const inner = Math.max(24, Math.min(width - 2, bannerWidth + 6));
+					const body: string[] = [""];
+					for (const line of BANNER) {
+						const pad = Math.max(0, Math.floor((inner - [...line].length) / 2));
+						body.push(" ".repeat(pad) + line);
+					}
+					body.push("");
+					const tag = "81 palettes · 16 fields · 34 effects";
+					body.push(" ".repeat(Math.max(0, Math.floor((inner - tag.length) / 2))) + tag);
+					const hint = "any key to dismiss";
+					body.push(" ".repeat(Math.max(0, Math.floor((inner - hint.length) / 2))) + hint);
+					body.push("");
 
-  constructor(
-    private readonly tui: { requestRender: () => void },
-    private readonly theme: Theme,
-    private readonly settings: RainbowSettings,
-    private readonly done: () => void,
-  ) {
-    this.timer = ENABLE_SPLASH_ANIMATION && getEffectiveAnimationSpeed(settings.speed, settings) > 0
-      ? setInterval(() => {
-        this.tui.requestRender();
-      }, 50)
-      : undefined;
-  }
-
-  dispose() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-  }
-
-  invalidate() {}
-
-  handleInput(data: string) {
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
-      this.done();
-    }
-  }
-
-  render(width: number) {
-    const innerWidth = Math.max(20, Math.min(this.width, width) - 2);
-    const elapsedMs = ENABLE_SPLASH_ANIMATION ? Date.now() - this.startedAt : 0;
-    const lines: string[] = [];
-
-    lines.push(this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`));
-    lines.push(this.wrap(this.theme.fg("muted", "Pi Rainbow Splash"), innerWidth));
-    lines.push(this.wrap("", innerWidth));
-
-    for (let row = 0; row < LOGO.length; row += 1) {
-      lines.push(this.wrap(colorize(LOGO[row]!, elapsedMs, row, this.settings), innerWidth));
-    }
-
-    lines.push(this.wrap("", innerWidth));
-    lines.push(this.wrap(this.theme.fg("muted", "ctrl+shift+r or /rainbow-splash"), innerWidth));
-    lines.push(this.wrap(this.theme.fg("dim", "Esc, Enter, or Space to close"), innerWidth));
-    lines.push(this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
-
-    return lines.map((line) => truncateToWidth(line, width));
-  }
-
-  private wrap(content: string, innerWidth: number) {
-    return this.theme.fg("border", "│") + center(content, innerWidth) + this.theme.fg("border", "│");
-  }
+					return engine.process(body, {
+						width: inner,
+						height: body.length,
+						fullscreen: true,
+						cursor: null,
+						overlayVisible: false,
+					});
+				},
+				handleInput: close,
+				dispose: close,
+			};
+		},
+		{ overlay: true },
+	);
 }
-
-export const showRainbowSplash = async (ctx: SplashContext, settings: RainbowSettings) => {
-  await ctx.ui.custom<void>(
-    (tui, theme, _keybindings, done) => {
-      return new RainbowSplash(tui, theme, settings, done);
-    },
-    { overlay: true },
-  );
-};

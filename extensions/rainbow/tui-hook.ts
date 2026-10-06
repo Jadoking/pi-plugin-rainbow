@@ -1,334 +1,243 @@
-import { ProcessTerminal, TUI } from "@mariozechner/pi-tui";
+/**
+ * The hook into pi-tui.
+ *
+ * pi-tui funnels every frame through `applyLineResets(screen)` as the last
+ * transform before diffing against the previous frame, in both the alt-screen
+ * and the main-screen renderers. That is the one place where the complete,
+ * fully-composited screen exists as an array of strings — so that is where the
+ * rainbow goes.
+ *
+ * `applyLineResets` is also called once from `afterTerminalStop` to produce the
+ * scrollback dump, which must stay untouched; the `inRender` flag distinguishes
+ * the two.
+ */
 
-import { emitAnsiGrid, emitAnsiGridCompact } from "./ansi-emit.js";
-import { parseAnsiGrid } from "./ansi-grid.js";
-import { applyRainbowFramePostprocess, isRainbowFramePostprocessEnabled } from "./postprocess.js";
-import {
-  countChangedLines,
-  isRainbowPostprocessCompactEnabled,
-  isRainbowPostprocessProbeEnabled,
-  isRainbowPostprocessRoundtripEnabled,
-  isRainbowPostprocessSpikeEnabled,
-  isRainbowRenderDebugEnabled,
-  logRainbowDebugEvent,
-} from "./render-debug.js";
+import type { RainbowEngine } from "./engine.js";
+import { parseHex, type RGB } from "./color.js";
+import type { RainbowSettings } from "./settings.js";
+import { isRainbowAnimationDisabled } from "./terminal.js";
 
-type TuiPostprocessContext = {
-  renderIndex: number;
-  width: number;
-  height: number;
-  previousLines?: string[];
+/** Structural type for the bits of pi-tui we touch, so we do not depend on its class shapes. */
+type HookableTui = {
+	mode?: string;
+	terminal?: { columns?: number; rows?: number };
+	requestRender?: (force?: boolean) => void;
+	hasOverlay?: () => boolean;
+	applyLineResets?: (lines: string[]) => string[];
+	doRender?: () => void;
+	extractCursorPosition?: (lines: string[], height: number) => { row: number; col: number } | null;
+	onTerminalColorSchemeChange?: (listener: (scheme: unknown) => void) => () => void;
 };
 
-type TuiPostprocessFn = (lines: string[], context: TuiPostprocessContext) => string[];
-
-type FrameMetrics = {
-  renderIndex: number;
-  startedAtMs: number;
-  requestCalls: number;
-  bytesWritten: number;
-  writeCount: number;
-  lineCount: number;
-  changedLines: number;
-  width: number;
-  height: number;
-  postprocess: "none" | "probe" | "roundtrip" | "roundtrip-probe" | "compact" | "compact-probe" | "rainbow" | "rainbow-probe";
-  fullRedrawsBefore: number;
-  lineBytesBeforePostprocess: number;
-  lineBytesAfterPostprocess: number;
-  sgrCountBeforePostprocess: number;
-  sgrCountAfterPostprocess: number;
+type Patched = HookableTui & {
+	__rainbowPatched?: boolean;
+	__rainbowRestore?: () => void;
 };
 
-type TuiPatchState = {
-  installed: boolean;
-  renderCounter: number;
-  postprocess?: TuiPostprocessFn;
-  postprocessName: FrameMetrics["postprocess"];
+export type HookOptions = {
+	engine: RainbowEngine;
+	getSettings: () => RainbowSettings;
+	/** Called with the measured frame cost, for the status line. */
+	onFrame?: (ms: number) => void;
 };
 
-type TuiPrototype = {
-  doRender(this: TuiInstance): void;
-  requestRender(this: TuiInstance, force?: boolean): void;
-  applyLineResets(this: TuiInstance, lines: string[]): string[];
-};
+export class RainbowTuiHook {
+	private tui: Patched | null = null;
+	private readonly opts: HookOptions;
+	private inRender = false;
+	private cursor: { x: number; y: number } | null = null;
+	private timer: NodeJS.Timeout | null = null;
+	private currentFps = 0;
+	private disposed = false;
 
-type ProcessTerminalPrototype = {
-  write(this: Record<PropertyKey, unknown>, data: string): void;
-};
+	constructor(opts: HookOptions) {
+		this.opts = opts;
+	}
 
-type TuiInstance = {
-  terminal: Record<PropertyKey, unknown> & {
-    columns: number;
-    rows: number;
-  };
-  previousLines?: string[];
-  fullRedraws?: number;
-  [REQUEST_COUNT_KEY]?: number;
-  [FRAME_METRICS_KEY]?: FrameMetrics | undefined;
-};
+	get attached(): boolean {
+		return this.tui !== null;
+	}
 
-const PATCH_STATE_KEY = Symbol.for("pi-plugin-rainbow.tuiPatchState");
-const REQUEST_COUNT_KEY = Symbol.for("pi-plugin-rainbow.tuiRequestCount");
-const FRAME_METRICS_KEY = Symbol.for("pi-plugin-rainbow.tuiFrameMetrics");
-const PROBE_COLOR = "\x1b[38;5;213m";
+	get isFullscreen(): boolean {
+		return this.tui?.mode === "fullscreen";
+	}
 
-const readEscapeSequence = (line: string, index: number) => {
-  if (index >= line.length || line.charCodeAt(index) !== 0x1b) {
-    return undefined;
-  }
+	/** Terminal size, for commands that want to report it. */
+	get size(): { width: number; height: number } {
+		return {
+			width: Math.max(1, this.tui?.terminal?.columns ?? 80),
+			height: Math.max(1, this.tui?.terminal?.rows ?? 24),
+		};
+	}
 
-  const next = line[index + 1];
-  if (next === "[") {
-    let end = index + 2;
-    while (end < line.length && !(line.charCodeAt(end) >= 0x40 && line.charCodeAt(end) <= 0x7e)) {
-      end += 1;
-    }
-    if (end < line.length) {
-      return line.slice(index, end + 1);
-    }
-    return undefined;
-  }
+	attach(tui: unknown): void {
+		if (this.disposed) return;
+		const t = tui as Patched;
+		if (!t || typeof t.applyLineResets !== "function") return;
+		if (t.__rainbowPatched) {
+			this.tui = t;
+			this.restartPump();
+			return;
+		}
 
-  if (next === "]" || next === "_" || next === "P") {
-    let end = index + 2;
-    while (end < line.length) {
-      if (line.charCodeAt(end) === 0x07) {
-        return line.slice(index, end + 1);
-      }
-      if (line.charCodeAt(end) === 0x1b && line[end + 1] === "\\") {
-        return line.slice(index, Math.min(end + 2, line.length));
-      }
-      end += 1;
-    }
-  }
+		const originalApply = t.applyLineResets.bind(t);
+		const originalDoRender = typeof t.doRender === "function" ? t.doRender.bind(t) : null;
+		const originalExtract =
+			typeof t.extractCursorPosition === "function" ? t.extractCursorPosition.bind(t) : null;
 
-  return undefined;
-};
+		t.applyLineResets = (lines: string[]): string[] => {
+			const base = originalApply(lines);
+			if (!this.inRender) return base;
+			return this.transform(base);
+		};
 
-const stripAnsi = (value: string) => {
-  return value
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1bP[\s\S]*?\x1b\\/g, "");
-};
+		if (originalDoRender) {
+			t.doRender = (): void => {
+				this.inRender = true;
+				try {
+					originalDoRender();
+				} finally {
+					this.inRender = false;
+				}
+			};
+		}
 
-const countUtf8Bytes = (lines: string[]) => {
-  return lines.reduce((total, line) => total + Buffer.byteLength(line, "utf8"), 0);
-};
+		if (originalExtract) {
+			t.extractCursorPosition = (lines: string[], height: number) => {
+				const pos = originalExtract(lines, height);
+				this.cursor = pos ? { x: pos.col, y: pos.row } : null;
+				return pos;
+			};
+		}
 
-const countSgrSequences = (lines: string[]) => {
-  return lines.reduce((total, line) => total + (line.match(/\x1b\[[\d;]*m/g)?.length ?? 0), 0);
-};
+		t.__rainbowPatched = true;
+		t.__rainbowRestore = () => {
+			t.applyLineResets = originalApply;
+			if (originalDoRender) t.doRender = originalDoRender;
+			if (originalExtract) t.extractCursorPosition = originalExtract;
+			t.__rainbowPatched = false;
+			t.__rainbowRestore = undefined;
+		};
 
-const applyPostprocessRoundtrip = (lines: string[]) => {
-  return emitAnsiGrid(parseAnsiGrid(lines));
-};
+		this.tui = t;
+		this.subscribeTheme(t);
+		this.restartPump();
+	}
 
-const applyPostprocessCompact = (lines: string[]) => {
-  return emitAnsiGridCompact(parseAnsiGrid(lines));
-};
+	detach(): void {
+		this.stopPump();
+		const t = this.tui;
+		this.tui = null;
+		t?.__rainbowRestore?.();
+	}
 
-const getPatchState = () => {
-  const scopedGlobal = globalThis as typeof globalThis & {
-    [PATCH_STATE_KEY]?: TuiPatchState;
-  };
+	dispose(): void {
+		this.disposed = true;
+		this.detach();
+	}
 
-  if (!scopedGlobal[PATCH_STATE_KEY]) {
-    scopedGlobal[PATCH_STATE_KEY] = {
-      installed: false,
-      renderCounter: 0,
-      postprocess: undefined,
-      postprocessName: "none",
-    };
-  }
+	/** Force an immediate repaint (after a settings change, say). */
+	refresh(): void {
+		this.tui?.requestRender?.(true);
+	}
 
-  return scopedGlobal[PATCH_STATE_KEY]!;
-};
+	/* ---------------------------------------------------------------- */
 
-const chooseProbeLineIndex = (lines: string[]) => {
-  return lines.findIndex((line) => stripAnsi(line).trim().length > 0);
-};
+	private transform(lines: string[]): string[] {
+		const tui = this.tui;
+		if (!tui) return lines;
+		const s = this.opts.getSettings();
+		if (!s.enabled) return lines;
 
-export const insertAfterLeadingEscapeSequences = (line: string, text: string) => {
-  let index = 0;
-  while (index < line.length && line.charCodeAt(index) === 0x1b) {
-    const sequence = readEscapeSequence(line, index);
-    if (!sequence) {
-      break;
-    }
-    index += sequence.length;
-  }
+		const fullscreen = tui.mode === "fullscreen";
+		if (!fullscreen && s.regularMode === "off") return lines;
 
-  return line.slice(0, index) + text + line.slice(index);
-};
+		const width = Math.max(1, tui.terminal?.columns ?? 80);
+		const height = Math.max(1, tui.terminal?.rows ?? lines.length);
 
-export const applyPostprocessProbe = (lines: string[]) => {
-  const index = chooseProbeLineIndex(lines);
-  if (index === -1) {
-    return lines;
-  }
+		// In the main-screen renderer `lines` is only the newly appended block,
+		// not a whole screen; never pad those or the scrollback grows sideways.
+		const padFullWidth = fullscreen && s.fullBleed;
 
-  const next = [...lines];
-  next[index] = insertAfterLeadingEscapeSequences(next[index]!, PROBE_COLOR);
-  return next;
-};
+		const started = performance.now();
+		const out = this.opts.engine.process(lines, {
+			width,
+			height: fullscreen ? height : lines.length,
+			fullscreen: padFullWidth,
+			cursor: this.cursor,
+			overlayVisible: tui.hasOverlay?.() ?? false,
+		});
+		this.opts.onFrame?.(performance.now() - started);
+		return out;
+	}
 
-export const shouldInstallRainbowTuiHooks = () => {
-  return isRainbowRenderDebugEnabled() || isRainbowPostprocessSpikeEnabled() || isRainbowFramePostprocessEnabled();
-};
+	private subscribeTheme(tui: Patched): void {
+		try {
+			tui.onTerminalColorSchemeChange?.((scheme) => {
+				const s = scheme as { background?: string; foreground?: string } | undefined;
+				const bg = s?.background ? safeHex(s.background) : null;
+				const fg = s?.foreground ? safeHex(s.foreground) : null;
+				this.opts.engine.setTheme(bg, fg);
+			});
+		} catch {
+			// Terminal does not support colour queries — the defaults are fine.
+		}
+	}
 
-const getPostprocessName = () => {
-  const rainbowEnabled = isRainbowFramePostprocessEnabled();
-  const spikeEnabled = isRainbowPostprocessSpikeEnabled();
-  const useCompact = spikeEnabled && isRainbowPostprocessCompactEnabled();
-  const useRoundtrip = spikeEnabled && isRainbowPostprocessRoundtripEnabled();
-  const useProbe = spikeEnabled && isRainbowPostprocessProbeEnabled();
+	/* ---------------------------------------------------------------- *
+	 * Animation pump
+	 * ---------------------------------------------------------------- */
 
-  if (rainbowEnabled && useProbe) return "rainbow-probe" as const;
-  if (rainbowEnabled) return "rainbow" as const;
-  if (useCompact && useProbe) return "compact-probe" as const;
-  if (useCompact) return "compact" as const;
-  if (useRoundtrip && useProbe) return "roundtrip-probe" as const;
-  if (useRoundtrip) return "roundtrip" as const;
-  if (useProbe) return "probe" as const;
-  return "none" as const;
-};
+	private targetFps(): number {
+		const s = this.opts.getSettings();
+		if (!s.enabled) return 0;
+		if (isRainbowAnimationDisabled({ animateInTmux: s.animateInTmux })) return 0;
+		if (s.speed <= 0 && Object.keys(s.fx).length === 0) return 0;
 
-export const installRainbowTuiHooks = () => {
-  const state = getPatchState();
-  const rainbowEnabled = isRainbowFramePostprocessEnabled();
-  const spikeEnabled = isRainbowPostprocessSpikeEnabled();
-  const useCompact = spikeEnabled && isRainbowPostprocessCompactEnabled();
-  const useRoundtrip = spikeEnabled && isRainbowPostprocessRoundtripEnabled() && !useCompact;
-  const useProbe = spikeEnabled && isRainbowPostprocessProbeEnabled();
-  state.postprocess = rainbowEnabled || useCompact || useRoundtrip || useProbe
-    ? (lines, context) => {
-      let next = lines;
-      if (rainbowEnabled) {
-        next = applyRainbowFramePostprocess(next, context);
-      } else if (useCompact) {
-        next = applyPostprocessCompact(next);
-      } else if (useRoundtrip) {
-        next = applyPostprocessRoundtrip(next);
-      }
-      if (useProbe) {
-        next = applyPostprocessProbe(next);
-      }
-      return next;
-    }
-    : undefined;
-  state.postprocessName = getPostprocessName();
+		const idle = this.opts.engine.idleSeconds;
+		if (!s.alwaysAnimate && idle > s.idleAfter) return 0;
+		if (idle > s.idleAfter) return s.idleFps;
+		return s.reducedMotion ? Math.min(s.fps, 12) : s.fps;
+	}
 
-  if (state.installed) {
-    return;
-  }
+	/** Re-evaluate the frame rate; call after any settings change. */
+	restartPump(): void {
+		const fps = this.targetFps();
+		if (fps === this.currentFps && this.timer) return;
+		this.stopPump();
+		this.currentFps = fps;
+		if (fps <= 0 || !this.tui) return;
+		const interval = Math.max(16, Math.round(1000 / fps));
+		this.timer = setInterval(() => {
+			// Idle/active transitions change the target rate; re-arm when it moves.
+			if (this.targetFps() !== this.currentFps) {
+				this.restartPump();
+				return;
+			}
+			this.tui?.requestRender?.();
+		}, interval);
+		this.timer.unref?.();
+	}
 
-  const tuiPrototype = TUI.prototype as unknown as TuiPrototype;
-  const terminalPrototype = ProcessTerminal.prototype as unknown as ProcessTerminalPrototype;
-  const originalRequestRender = tuiPrototype.requestRender;
-  const originalApplyLineResets = tuiPrototype.applyLineResets;
-  const originalDoRender = tuiPrototype.doRender;
-  const originalWrite = terminalPrototype.write;
+	private stopPump(): void {
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		this.currentFps = 0;
+	}
 
-  tuiPrototype.requestRender = function patchedRequestRender(this: TuiInstance, force?: boolean) {
-    this[REQUEST_COUNT_KEY] = (this[REQUEST_COUNT_KEY] ?? 0) + 1;
-    return originalRequestRender.call(this, force);
-  };
+	get fps(): number {
+		return this.currentFps;
+	}
+}
 
-  tuiPrototype.applyLineResets = function patchedApplyLineResets(this: TuiInstance, lines: string[]) {
-    const nextLines = originalApplyLineResets.call(this, lines);
-    const patchState = getPatchState();
-    const context: TuiPostprocessContext = {
-      renderIndex: this[FRAME_METRICS_KEY]?.renderIndex ?? 0,
-      width: this.terminal.columns,
-      height: this.terminal.rows,
-      previousLines: this.previousLines,
-    };
-    const transformedLines = patchState.postprocess ? patchState.postprocess(nextLines, context) : nextLines;
-    const metrics = this[FRAME_METRICS_KEY];
-    if (metrics) {
-      metrics.lineCount = transformedLines.length;
-      metrics.changedLines = countChangedLines(this.previousLines, transformedLines);
-      metrics.postprocess = patchState.postprocessName;
-      metrics.lineBytesBeforePostprocess = countUtf8Bytes(nextLines);
-      metrics.lineBytesAfterPostprocess = countUtf8Bytes(transformedLines);
-      metrics.sgrCountBeforePostprocess = countSgrSequences(nextLines);
-      metrics.sgrCountAfterPostprocess = countSgrSequences(transformedLines);
-    }
-    return transformedLines;
-  };
-
-  tuiPrototype.doRender = function patchedDoRender(this: TuiInstance) {
-    const metrics: FrameMetrics = {
-      renderIndex: ++state.renderCounter,
-      startedAtMs: Date.now(),
-      requestCalls: this[REQUEST_COUNT_KEY] ?? 0,
-      bytesWritten: 0,
-      writeCount: 0,
-      lineCount: 0,
-      changedLines: 0,
-      width: this.terminal.columns,
-      height: this.terminal.rows,
-      postprocess: state.postprocessName,
-      fullRedrawsBefore: this.fullRedraws ?? 0,
-      lineBytesBeforePostprocess: 0,
-      lineBytesAfterPostprocess: 0,
-      sgrCountBeforePostprocess: 0,
-      sgrCountAfterPostprocess: 0,
-    };
-
-    this[REQUEST_COUNT_KEY] = 0;
-    this[FRAME_METRICS_KEY] = metrics;
-    this.terminal[FRAME_METRICS_KEY] = metrics;
-
-    try {
-      return originalDoRender.call(this);
-    } finally {
-      const durationMs = Date.now() - metrics.startedAtMs;
-      logRainbowDebugEvent({
-        type: "frame",
-        renderIndex: metrics.renderIndex,
-        requestCalls: metrics.requestCalls,
-        changedLines: metrics.changedLines,
-        lineCount: metrics.lineCount,
-        bytesWritten: metrics.bytesWritten,
-        writeCount: metrics.writeCount,
-        width: metrics.width,
-        height: metrics.height,
-        durationMs,
-        postprocess: metrics.postprocess,
-        lineBytesBeforePostprocess: metrics.lineBytesBeforePostprocess,
-        lineBytesAfterPostprocess: metrics.lineBytesAfterPostprocess,
-        sgrCountBeforePostprocess: metrics.sgrCountBeforePostprocess,
-        sgrCountAfterPostprocess: metrics.sgrCountAfterPostprocess,
-        fullRedrawsBefore: metrics.fullRedrawsBefore,
-        fullRedrawsAfter: this.fullRedraws ?? metrics.fullRedrawsBefore,
-      });
-      this.terminal[FRAME_METRICS_KEY] = undefined;
-      this[FRAME_METRICS_KEY] = undefined;
-    }
-  };
-
-  terminalPrototype.write = function patchedTerminalWrite(this: Record<PropertyKey, unknown>, data: string) {
-    const metrics = this[FRAME_METRICS_KEY] as FrameMetrics | undefined;
-    if (metrics) {
-      metrics.bytesWritten += Buffer.byteLength(data, "utf8");
-      metrics.writeCount += 1;
-    }
-
-    return originalWrite.call(this, data);
-  };
-
-  state.installed = true;
-  logRainbowDebugEvent({
-    type: "install",
-    hook: "tui",
-    postprocess: state.postprocessName,
-    spikeEnabled: isRainbowPostprocessSpikeEnabled(),
-    probeEnabled: isRainbowPostprocessProbeEnabled(),
-    roundtripEnabled: isRainbowPostprocessRoundtripEnabled(),
-    compactEnabled: isRainbowPostprocessCompactEnabled(),
-    rainbowEnabled: isRainbowFramePostprocessEnabled(),
-  });
-};
+function safeHex(value: string): RGB | null {
+	try {
+		const hex = value.trim().replace(/^#/, "");
+		if (!/^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(hex)) return null;
+		return parseHex(hex);
+	} catch {
+		return null;
+	}
+}

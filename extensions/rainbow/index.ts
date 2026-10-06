@@ -1,206 +1,344 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+/**
+ * pi-rainbow — entry point.
+ *
+ * Registers the commands, the shortcuts, the status line and the invisible
+ * widget whose only job is to hand us the TUI instance so the hook can patch
+ * its render path.
+ */
 
-import { installAssistantMessagePatch } from "./assistant-patch.js";
-import { RainbowEditor } from "./editor.js";
-import { getNextRainbowPresetId, getPreviousRainbowPresetId, getRainbowPreset, findRainbowPreset, RAINBOW_PRESETS } from "./presets.js";
-import { configureRainbowFramePostprocess, isRainbowFramePostprocessEnabled } from "./postprocess.js";
-import { RainbowAnimationController } from "./runtime.js";
-import { showRainbowSettingsDialog } from "./settings-dialog.js";
-import { getAnimationSuppressionReason, getEffectiveAnimationSpeed } from "./terminal.js";
-import { installRainbowTuiHooks, shouldInstallRainbowTuiHooks } from "./tui-hook.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+import { RainbowEngine } from "./engine.js";
+import { GRADIENT_MODES, MOTION_MODES, type GradientMode, type MotionMode } from "./field.js";
+import { allFx, getFx } from "./fx.js";
+import { findPreset, nextPresetId, PRESETS, presetIds, prevPresetId } from "./presets.js";
 import {
-  DEFAULT_SETTINGS,
-  RainbowSettingsStore,
-  loadSettings,
-  saveSettings,
-  type RainbowSettings,
+	BUNDLES,
+	DEFAULT_SETTINGS,
+	getBundle,
+	loadSettings,
+	normalizeSettings,
+	type RainbowSettings,
+	saveSettings,
 } from "./settings.js";
+import { showRainbowSettingsDialog } from "./settings-dialog.js";
 import { showRainbowSplash } from "./splash.js";
+import { RainbowTuiHook } from "./tui-hook.js";
 
 const STATUS_ID = "pi-plugin-rainbow";
-const SPLASH_SHORTCUT = "ctrl+shift+r";
+const WIDGET_ID = "pi-plugin-rainbow-hook";
 
-const formatNumber = (value: number, digits: number) => {
-  return value.toFixed(digits);
+type AnyCtx = {
+	hasUI: boolean;
+	ui: {
+		notify: (text: string, level?: "info" | "warning" | "error") => void;
+		setStatus: (id: string, text: string | undefined) => void;
+		setWidget: (key: string, content: unknown, options?: unknown) => void;
+		theme: { fg: (role: string, text: string) => string };
+	};
 };
 
 export default function rainbowPlugin(pi: ExtensionAPI) {
-  const store = new RainbowSettingsStore(DEFAULT_SETTINGS);
-  const animation = new RainbowAnimationController();
-  const useFramePostprocess = isRainbowFramePostprocessEnabled();
-  let loadPromise: Promise<void> | undefined;
+	let settings: RainbowSettings = { ...DEFAULT_SETTINGS };
+	let loaded: Promise<void> | undefined;
+	let frameMs = 0;
 
-  if (shouldInstallRainbowTuiHooks()) {
-    installRainbowTuiHooks();
-  }
+	const engine = new RainbowEngine(settings);
+	const hook = new RainbowTuiHook({
+		engine,
+		getSettings: () => settings,
+		onFrame: (ms) => {
+			frameMs = ms;
+		},
+	});
 
-  if (!useFramePostprocess) {
-    installAssistantMessagePatch(store, animation);
-  }
+	const ensureLoaded = async () => {
+		if (!loaded) {
+			loaded = loadSettings().then((next) => {
+				settings = next;
+				engine.updateSettings(next);
+			});
+		}
+		await loaded;
+	};
 
-  const ensureLoaded = async () => {
-    if (!loadPromise) {
-      loadPromise = loadSettings().then((next) => {
-        store.set(next);
-      });
-    }
+	const setStatus = (ctx: AnyCtx) => {
+		if (!ctx.hasUI) return;
+		if (!settings.showStatus) {
+			ctx.ui.setStatus(STATUS_ID, undefined);
+			return;
+		}
+		const theme = ctx.ui.theme;
+		const preset = findPreset(settings.preset);
+		const fxCount = Object.values(settings.fx).filter((v) => v > 0).length;
+		const head = settings.enabled
+			? theme.fg("success", "◆ rainbow")
+			: theme.fg("dim", "◇ rainbow off");
+		const detail = theme.fg(
+			"dim",
+			` ${preset?.id ?? settings.preset} · ${settings.mode}/${settings.motion} · ${fxCount}fx` +
+				(hook.fps > 0 ? ` · ${hook.fps}fps` : " · static") +
+				(frameMs > 0.1 ? ` · ${frameMs.toFixed(1)}ms` : ""),
+		);
+		ctx.ui.setStatus(STATUS_ID, `${head}${detail}`);
+	};
 
-    await loadPromise;
-  };
+	const apply = (ctx: AnyCtx, next: Partial<RainbowSettings>, message?: string) => {
+		settings = normalizeSettings({ ...settings, ...next });
+		engine.updateSettings(settings);
+		hook.restartPump();
+		hook.refresh();
+		setStatus(ctx);
+		if (message && ctx.hasUI) ctx.ui.notify(message, "info");
+		void saveSettings(settings).catch((error: unknown) => {
+			const m = error instanceof Error ? error.message : "failed to save";
+			ctx.ui.notify(`Rainbow: settings applied but not saved (${m})`, "error");
+		});
+	};
 
-  const setStatus = (ctx: { hasUI: boolean; ui: { setStatus: (id: string, text: string | undefined) => void; theme: any } }, settings = store.get()) => {
-    const preset = getRainbowPreset(settings.preset);
+	/* ------------------------------------------------------------ *
+	 * Lifecycle
+	 * ------------------------------------------------------------ */
 
-    if (!ctx.hasUI) return;
+	pi.on("session_start", async (_event, ctx) => {
+		await ensureLoaded();
+		const c = ctx as unknown as AnyCtx;
+		if (!c.hasUI) return;
 
-    if (!settings.showStatus) {
-      ctx.ui.setStatus(STATUS_ID, undefined);
-      return;
-    }
+		// An invisible widget is the least invasive way to get the TUI handle:
+		// it renders nothing, it just captures the instance on first render.
+		c.ui.setWidget(WIDGET_ID, (tui: unknown) => {
+			hook.attach(tui);
+			return {
+				render: () => [] as string[],
+				dispose: () => hook.detach(),
+			};
+		});
 
-    const effectiveSpeed = getEffectiveAnimationSpeed(settings.speed, settings);
-    const suppressionReason = getAnimationSuppressionReason(settings);
-    const speed = effectiveSpeed > 0
-      ? ` anim:${formatNumber(effectiveSpeed, 3)}`
-      : settings.speed > 0 && suppressionReason
-        ? ` static:${suppressionReason}`
-        : " static";
-    const theme = ctx.ui.theme;
-    const label = settings.enabled ? theme.fg("success", "rainbow") : theme.fg("dim", "rainbow off");
-    const detail = theme.fg(
-      "dim",
-      ` ${preset.name} fg:${settings.fg ? "on" : "off"}${speed} bands:${formatNumber(settings.turns, 2)}`,
-    );
-    ctx.ui.setStatus(STATUS_ID, `${label}${detail}`);
-  };
+		setStatus(c);
+		if (settings.splashOnStart && settings.enabled) {
+			void showRainbowSplash(ctx, settings);
+		}
+	});
 
-  const applySettings = (ctx: { hasUI: boolean; ui: { notify: (text: string, level: "error") => void; setStatus: (id: string, text: string | undefined) => void; theme: any } }, next: RainbowSettings) => {
-    store.set(next);
-    setStatus(ctx, next);
+	pi.on("before_agent_start", async () => {
+		engine.pulse(0.6);
+		hook.restartPump();
+	});
 
-    void saveSettings(next).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "failed to save settings";
-      ctx.ui.notify(`Rainbow settings were updated in-memory, but persistence failed: ${message}`, "error");
-    });
-  };
+	pi.on("agent_end", async () => {
+		engine.pulse(0.35);
+		hook.restartPump();
+	});
 
-  pi.on("session_start", async (_event, ctx) => {
-    await ensureLoaded();
+	pi.on("session_shutdown", async () => {
+		hook.dispose();
+	});
 
-    if (!ctx.hasUI) {
-      return;
-    }
+	/* ------------------------------------------------------------ *
+	 * Commands
+	 * ------------------------------------------------------------ */
 
-    if (useFramePostprocess) {
-      configureRainbowFramePostprocess(store, animation, () => ctx.ui.theme);
-    }
+	pi.registerCommand("rainbow", {
+		description: "Toggle the rainbow on or off",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const arg = args.trim().toLowerCase();
+			const next = arg === "on" ? true : arg === "off" ? false : !settings.enabled;
+			apply(c, { enabled: next }, `Rainbow ${next ? "on" : "off"}`);
+		},
+	});
 
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      return new RainbowEditor(tui, theme, keybindings, store, animation);
-    });
+	pi.registerCommand("rainbow-settings", {
+		description: "Open the live rainbow settings dialog",
+		handler: async (_args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			if (!c.hasUI) {
+				c.ui.notify("Rainbow settings need interactive mode", "error");
+				return;
+			}
+			await showRainbowSettingsDialog(ctx, settings, (next) => apply(c, next));
+		},
+	});
 
-    setStatus(ctx);
-  });
+	pi.registerCommand("rainbow-preset", {
+		description: "Pick a colour palette: <id> | next | prev | list | random",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const q = args.trim().toLowerCase();
 
-  pi.on("before_agent_start", async () => {
-    animation.start();
-  });
+			if (!q || q === "list") {
+				const byGroup = new Map<string, string[]>();
+				for (const p of PRESETS) {
+					const list = byGroup.get(p.group) ?? [];
+					list.push(p.id);
+					byGroup.set(p.group, list);
+				}
+				const text = [...byGroup.entries()]
+					.map(([g, ids]) => `${g}: ${ids.join(", ")}`)
+					.join("\n");
+				c.ui.notify(`${PRESETS.length} palettes\n${text}`, "info");
+				return;
+			}
 
-  pi.on("agent_end", async () => {
-    const settings = store.get();
-    animation.stop(getEffectiveAnimationSpeed(settings.speed, settings));
-  });
+			let id: string | undefined;
+			if (q === "next") id = nextPresetId(settings.preset);
+			else if (q === "prev" || q === "previous") id = prevPresetId(settings.preset);
+			else if (q === "random") {
+				const ids = presetIds();
+				id = ids[Math.floor(Math.random() * ids.length)];
+			} else id = findPreset(q)?.id;
 
-  pi.on("session_shutdown", async () => {
-    animation.reset();
-  });
+			if (!id) {
+				c.ui.notify(`Unknown palette "${q}". Try /rainbow-preset list`, "error");
+				return;
+			}
+			apply(c, { preset: id }, `Palette: ${findPreset(id)?.name ?? id}`);
+		},
+	});
 
-  pi.registerCommand("rainbow-settings", {
-    description: "Adjust the Pi rainbow effect live",
-    handler: async (_args, ctx) => {
-      await ensureLoaded();
+	pi.registerCommand("rainbow-bundle", {
+		description: "Apply a whole look at once: zen, crt, synthwave, matrix, inferno…",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const q = args.trim().toLowerCase();
+			if (!q || q === "list") {
+				const text = BUNDLES.map((b) => `  ${b.id.padEnd(11)} ${b.blurb}`).join("\n");
+				c.ui.notify(`${BUNDLES.length} bundles\n${text}`, "info");
+				return;
+			}
+			const bundle = getBundle(q);
+			if (!bundle) {
+				c.ui.notify(`Unknown bundle "${q}". Try /rainbow-bundle list`, "error");
+				return;
+			}
+			apply(c, bundle.settings, `${bundle.name} — ${bundle.blurb}`);
+		},
+	});
 
-      if (!ctx.hasUI) {
-        ctx.ui.notify("Rainbow settings require interactive mode", "error");
-        return;
-      }
+	pi.registerCommand("rainbow-fx", {
+		description: "Toggle or set an effect: <id> [0..1] | list | none",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const [name, value] = args.trim().split(/\s+/);
+			const q = (name ?? "").toLowerCase();
 
-      await showRainbowSettingsDialog(ctx, store, (next) => {
-        applySettings(ctx, next);
-      });
-    },
-  });
+			if (!q || q === "list") {
+				const byGroup = new Map<string, string[]>();
+				for (const f of allFx()) {
+					const list = byGroup.get(f.group) ?? [];
+					const on = (settings.fx[f.id] ?? 0) > 0;
+					list.push(on ? `${f.id}*` : f.id);
+					byGroup.set(f.group, list);
+				}
+				const text = [...byGroup.entries()]
+					.map(([g, ids]) => `${g}: ${ids.join(", ")}`)
+					.join("\n");
+				c.ui.notify(`${allFx().length} effects (* = active)\n${text}`, "info");
+				return;
+			}
 
-  pi.registerCommand("rainbow-reset", {
-    description: "Reset rainbow settings to their defaults",
-    handler: async (_args, ctx) => {
-      await ensureLoaded();
-      applySettings(ctx, { ...DEFAULT_SETTINGS });
-      ctx.ui.notify("Rainbow settings reset to defaults", "info");
-    },
-  });
+			if (q === "none" || q === "clear") {
+				apply(c, { fx: {} }, "All effects off");
+				return;
+			}
 
-  pi.registerCommand("rainbow-preset", {
-    description: "List, select, or rotate rainbow palette presets",
-    handler: async (args, ctx) => {
-      await ensureLoaded();
+			const layer = getFx(q);
+			if (!layer) {
+				c.ui.notify(`Unknown effect "${q}". Try /rainbow-fx list`, "error");
+				return;
+			}
+			const fx = { ...settings.fx };
+			if (value !== undefined && Number.isFinite(Number(value))) {
+				const v = Math.max(0, Math.min(1, Number(value)));
+				if (v === 0) delete fx[layer.id];
+				else fx[layer.id] = v;
+			} else if (fx[layer.id]) {
+				delete fx[layer.id];
+			} else {
+				fx[layer.id] = layer.defaultIntensity;
+			}
+			apply(c, { fx }, `${layer.name}: ${fx[layer.id] ? `${fx[layer.id]!.toFixed(2)}` : "off"}`);
+		},
+	});
 
-      const query = args.trim();
-      if (!query || query === "list") {
-        const presetList = RAINBOW_PRESETS.map((preset) => preset.id).join(", ");
-        ctx.ui.notify(`Rainbow presets: ${presetList}`, "info");
-        return;
-      }
+	pi.registerCommand("rainbow-mode", {
+		description: "Gradient field: diagonal, radial, plasma, spiral, voronoi…",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const q = args.trim().toLowerCase();
+			if (!q || q === "list") {
+				c.ui.notify(
+					`fields: ${GRADIENT_MODES.map((m) => m.id).join(", ")}\n` +
+						`motion: ${MOTION_MODES.map((m) => m.id).join(", ")}`,
+					"info",
+				);
+				return;
+			}
+			const field = GRADIENT_MODES.find((m) => m.id === q);
+			const motion = MOTION_MODES.find((m) => m.id === q);
+			if (field) apply(c, { mode: field.id as GradientMode }, `Field: ${field.id}`);
+			else if (motion) apply(c, { motion: motion.id as MotionMode }, `Motion: ${motion.id}`);
+			else c.ui.notify(`Unknown mode "${q}". Try /rainbow-mode list`, "error");
+		},
+	});
 
-      const current = store.get();
-      let nextPresetId: string | undefined;
+	pi.registerCommand("rainbow-speed", {
+		description: "Set animation speed (palette cycles per second)",
+		handler: async (args, ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const v = Number(args.trim());
+			if (!Number.isFinite(v)) {
+				c.ui.notify(`Speed is ${settings.speed}. Pass a number, e.g. /rainbow-speed 0.15`, "info");
+				return;
+			}
+			apply(c, { speed: v }, `Speed: ${v}`);
+		},
+	});
 
-      if (query === "next") {
-        nextPresetId = getNextRainbowPresetId(current.preset);
-      } else if (query === "prev" || query === "previous") {
-        nextPresetId = getPreviousRainbowPresetId(current.preset);
-      } else {
-        nextPresetId = findRainbowPreset(query)?.id;
-      }
+	pi.registerCommand("rainbow-reset", {
+		description: "Reset every rainbow setting to its default",
+		handler: async (_args, ctx) => {
+			await ensureLoaded();
+			apply(ctx as unknown as AnyCtx, { ...DEFAULT_SETTINGS }, "Rainbow reset to defaults");
+		},
+	});
 
-      if (!nextPresetId) {
-        ctx.ui.notify(`Unknown rainbow preset "${query}". Try /rainbow-preset list`, "error");
-        return;
-      }
+	pi.registerCommand("rainbow-splash", {
+		description: "Show the rainbow splash overlay",
+		handler: async (_args, ctx) => {
+			await ensureLoaded();
+			await showRainbowSplash(ctx, settings);
+		},
+	});
 
-      applySettings(ctx, {
-        ...current,
-        preset: nextPresetId,
-      });
+	/* ------------------------------------------------------------ *
+	 * Shortcuts
+	 * ------------------------------------------------------------ */
 
-      ctx.ui.notify(`Rainbow preset set to ${getRainbowPreset(nextPresetId).name}`, "info");
-    },
-  });
+	pi.registerShortcut("ctrl+shift+r", {
+		description: "Rainbow: next palette",
+		handler: async (ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			const id = nextPresetId(settings.preset);
+			apply(c, { preset: id }, `Palette: ${findPreset(id)?.name ?? id}`);
+		},
+	});
 
-  pi.registerCommand("rainbow-splash", {
-    description: "Show the Pi rainbow splash overlay",
-    handler: async (_args, ctx) => {
-      await ensureLoaded();
-
-      if (!ctx.hasUI) {
-        ctx.ui.notify("Rainbow splash requires interactive mode", "error");
-        return;
-      }
-
-      await showRainbowSplash(ctx, store.get());
-    },
-  });
-
-  pi.registerShortcut(SPLASH_SHORTCUT, {
-    description: "Show the Pi rainbow splash overlay",
-    handler: async (ctx) => {
-      await ensureLoaded();
-
-      if (!ctx.hasUI) {
-        return;
-      }
-
-      await showRainbowSplash(ctx, store.get());
-    },
-  });
+	pi.registerShortcut("ctrl+shift+e", {
+		description: "Rainbow: toggle on/off",
+		handler: async (ctx) => {
+			await ensureLoaded();
+			const c = ctx as unknown as AnyCtx;
+			apply(c, { enabled: !settings.enabled }, `Rainbow ${settings.enabled ? "off" : "on"}`);
+		},
+	});
 }
