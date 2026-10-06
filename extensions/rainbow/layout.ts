@@ -229,7 +229,25 @@ export const SCOPES: { id: RainbowScope; blurb: string }[] = [
  */
 export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 	const layout = analyzeLayout(frame);
-	if (scope === "screen" || scope === "text") return layout;
+	if (scope === "screen") return layout;
+
+	// Everything below the input box belongs to pi, not to the rainbow.
+	//
+	// The last rule on screen is the one that closes the editor, so whatever
+	// follows it is the status footer: model name, token counts, cost, session
+	// id. That is dense information people read at a glance rather than
+	// decoration, and colouring it only ever makes it harder to parse. The
+	// gradient stops at the input box.
+	const lastRule = layout.ruleRows.length
+		? layout.ruleRows[layout.ruleRows.length - 1]!
+		: -1;
+	if (lastRule >= 0) {
+		for (let y = lastRule + 1; y < frame.rows.length; y++) {
+			frame.rows[y]!.skip = true;
+		}
+	}
+
+	if (scope === "text") return layout;
 
 	for (let y = 0; y < frame.rows.length; y++) {
 		const row = frame.rows[y]!;
