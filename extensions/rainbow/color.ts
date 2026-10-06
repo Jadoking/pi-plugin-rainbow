@@ -291,3 +291,70 @@ export function nearestFrom(c: RGB, palette: RGB[]): RGB {
 	}
 	return best;
 }
+
+// ---------------------------------------------------------------- contrast
+
+/** WCAG relative luminance. */
+export function relativeLuminance(c: RGB): number {
+	const ch = (v: number) => {
+		const s = v / 255;
+		return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+	};
+	return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+}
+
+/** WCAG contrast ratio, 1 (identical) to 21 (black on white). */
+export function contrastRatio(a: RGB, b: RGB): number {
+	const la = relativeLuminance(a);
+	const lb = relativeLuminance(b);
+	return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+/**
+ * Force a foreground to clear a contrast ratio against its background, moving
+ * only lightness and keeping hue and chroma.
+ *
+ * A gradient does not care whether the colour it lands on is legible, so left
+ * alone it will happily paint dark red text onto a dark olive background. The
+ * hue is the part that carries the effect, though, and lightness is the part
+ * that carries readability — so they can be separated. Pushing L away from the
+ * background in OKLab preserves the palette's identity while guaranteeing the
+ * text can still be read.
+ *
+ * Returns the input unchanged when it already clears `min`, so cells that are
+ * fine cost one luminance calculation and nothing else.
+ */
+export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
+	if (min <= 1 || contrastRatio(fg, bg) >= min) return fg;
+
+	const { L, C, h } = rgbToOklch(fg);
+	// Move away from the background: lighten on dark, darken on light.
+	const up = relativeLuminance(bg) < 0.18;
+
+	// Binary search on lightness. Sixteen steps resolves L to ~1/65000, far
+	// finer than 8-bit output, and costs a bounded amount per cell.
+	let lo = up ? L : 0;
+	let hi = up ? 1 : L;
+	let best = oklchToRgb({ L: up ? 1 : 0, C, h });
+
+	if (contrastRatio(best, bg) < min) {
+		// Even pure white/black cannot clear the bar against this background;
+		// the most readable thing available is that extreme, so take it.
+		return best;
+	}
+
+	for (let i = 0; i < 16; i++) {
+		const mid = (lo + hi) / 2;
+		const candidate = oklchToRgb({ L: mid, C, h });
+		if (contrastRatio(candidate, bg) >= min) {
+			best = candidate;
+			if (up) hi = mid;
+			else lo = mid;
+		} else if (up) {
+			lo = mid;
+		} else {
+			hi = mid;
+		}
+	}
+	return best;
+}

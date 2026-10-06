@@ -63,6 +63,8 @@ export type Layout = {
 	rowBox: boolean[];
 	/** Runs of consecutive box rows. */
 	boxes: { top: number; bottom: number }[];
+	/** First and last row of each box run — the block's own bracketing rules. */
+	rowBoxEdge: boolean[];
 };
 
 /**
@@ -136,12 +138,20 @@ export function analyzeLayout(frame: Frame): Layout {
 	}
 
 	// Collapse box rows into runs so a caller can reason about whole blocks.
+	//
+	// The edges matter on their own. pi's editor reads well because two thin
+	// rules bracket it and the inside is left alone; a tool block has the same
+	// shape, so marking its first and last row lets it be framed the same way
+	// instead of being flooded with colour.
 	const boxes: { top: number; bottom: number }[] = [];
+	const rowBoxEdge: boolean[] = new Array(n).fill(false);
 	for (let y = 0; y < n; y++) {
 		if (!rowBox[y]) continue;
 		const top = y;
 		while (y + 1 < n && rowBox[y + 1]) y++;
 		boxes.push({ top, bottom: y });
+		rowBoxEdge[top] = true;
+		rowBoxEdge[y] = true;
 	}
 
 	const panels: Panel[] = [];
@@ -187,7 +197,7 @@ export function analyzeLayout(frame: Frame): Layout {
 		for (let y = p.top; y <= p.bottom; y++) rowPanel[y] = i;
 	}
 
-	return { panels, rowPanel, rowRule, rowChrome, ruleRows, rowBox, boxes };
+	return { panels, rowPanel, rowRule, rowChrome, ruleRows, rowBox, boxes, rowBoxEdge };
 }
 
 /**
@@ -231,7 +241,13 @@ export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 		}
 
 		// panels: keep the rules and every non-transcript panel.
-		if (layout.rowRule[y]) continue;
+		if (layout.rowRule[y]) {
+			// A rule is one row tall. Particles landing on it replace the line
+			// with scattered glyphs, which reads as a damaged rule rather than
+			// as an effect, so the gradient gets it to itself.
+			row.quiet = true;
+			continue;
+		}
 		// A background-filled block is a "box" even when it sits in the middle
 		// of the transcript, which is exactly where pi puts tool calls. These
 		// are the blocks worth colouring, so they override panel classification.

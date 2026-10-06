@@ -5,7 +5,17 @@
  * pipeline that turns the TUI's screen lines into the thing you actually see.
  */
 
-import { blendRamps, clamp01, mixRgb, type Ramp, type RGB, sampleRamp, saturate, shade } from "./color.js";
+import {
+	blendRamps,
+	clamp01,
+	ensureContrast,
+	mixRgb,
+	type Ramp,
+	type RGB,
+	sampleRamp,
+	saturate,
+	shade,
+} from "./color.js";
 import { type FieldState, fieldPhase, makeFieldState } from "./field.js";
 import { buildFrame, effectiveBg, emitFrame, type Frame } from "./frame.js";
 import { allFx, type FxContext, type FxEvent, type FxLayer, type FxTuning, makeRng } from "./fx.js";
@@ -35,6 +45,15 @@ export type FrameStats = {
 
 const DEFAULT_BG: RGB = { r: 16, g: 17, b: 22 };
 const DEFAULT_FG: RGB = { r: 215, g: 218, b: 226 };
+
+/**
+ * Glyphs exempt from the contrast floor: they are texture, not text.
+ */
+const DECOR_GLYPHS = new Set(
+	" \u2591\u2592\u2593\u2588\u2580\u2584\u258c\u2590\u00b7\u2219\u2022\u25e6\u00b0\u22c5" +
+		"\u2502\u2503\u2551\u258f\u258e\u258d\u258b\u258a\u2589" +
+		"\u2500\u2501\u2550\u2504\u2505\u2508\u2509\u254c\u254d\u2581\u2594_",
+);
 
 export class RainbowEngine {
 	private settings: RainbowSettings;
@@ -243,14 +262,25 @@ export class RainbowEngine {
 			}
 		}
 
-		// 3. Expire events.
+		// 3. Legibility floor.
+		//
+		// This runs last on purpose. The colouriser can be made careful, but an
+		// effect layer cannot: a particle or a post pass is free to drop any
+		// colour it likes onto a cell, and several of them will happily bury
+		// text. Enforcing the floor after every layer has had its turn means no
+		// effect can render the screen unreadable, however it is configured.
+		if (s.minContrast > 1) {
+			this.enforceContrast(frame, s.minContrast);
+		}
+
+		// 4. Expire events.
 		if (this.events.length) {
 			this.events = this.events.filter((e) => now - e.t0 < 2.5);
 		}
 
 		const out = emitFrame(frame);
 
-		// 4. Frame budget / adaptive quality.
+		// 5. Frame budget / adaptive quality.
 		const ms = performance.now() - started;
 		this.stats.lastMs = ms;
 		this.stats.frames++;
@@ -278,6 +308,33 @@ export class RainbowEngine {
 	}
 
 	/** Base pass: map every cell through the gradient field. */
+	/**
+	 * Final pass: guarantee every glyph clears the contrast floor.
+	 *
+	 * Only real glyphs are considered. Box-drawing characters, blocks and
+	 * shading glyphs are decoration whose whole job is to be subtle, and
+	 * forcing them to body-text contrast would turn a soft scanline into a
+	 * hard stripe — it would destroy the effects in the name of readability.
+	 */
+	private enforceContrast(frame: Frame, min: number): void {
+		for (const row of frame.rows) {
+			if (row.skip) continue;
+			for (const cell of row.cells) {
+				if (cell.blank) continue;
+				const ch = cell.outText ?? cell.text;
+				if (!ch || !ch.trim() || DECOR_GLYPHS.has(ch)) continue;
+
+				const bg = effectiveBg(cell, this.bg);
+				const fg = cell.outFg ?? cell.fg ?? this.fg;
+				const fixed = ensureContrast(fg, bg, min);
+				if (fixed !== fg) {
+					cell.outFg = fixed;
+					row.dirty = true;
+				}
+			}
+		}
+	}
+
 	private colorize(
 		frame: Frame,
 		field: FieldState,
@@ -301,6 +358,7 @@ export class RainbowEngine {
 			if (row.skip) continue;
 			const isRule = layout.rowRule[y] === true;
 			const inBox = layout.rowBox[y] === true;
+			const isBoxEdge = layout.rowBoxEdge[y] === true;
 
 			const cells = row.cells;
 			// A box or a footer strip is a UI element, not a canvas. Sampling
@@ -331,15 +389,25 @@ export class RainbowEngine {
 				// Background: tint every cell that does not already carry its
 				// own colour. Tinting only the empty cells leaves every word
 				// sitting in an untinted dark box, which looks like a bug.
-				if (paintBg && cell.bgCode === null) {
+				if (paintBg && !isRule && cell.bgCode === null) {
+					// Deliberately not on rules. A `\u2500` covers a sliver of its
+					// cell, so tinting the rest turns a hairline into a solid
+					// band and the gradient reads as a smear instead of a line.
+					// The glyph already carries the ramp undiluted; let it.
 					cell.outBg = mixRgb(this.bg, boxCol ?? col, 0.17 * blend);
 					row.dirty = true;
 				} else if (paintBg && inBox && boxCol) {
-					// pi fills tool calls and messages with a flat theme colour.
-					// Leaving those alone was what made the rainbow look like it
-					// stopped at the edge of every box; pulling them towards the
-					// ramp is what makes a block read as part of the gradient.
-					cell.outBg = mixRgb(effectiveBg(cell, this.bg), boxCol, 0.38 * blend);
+					// Frame the block, do not flood it.
+					//
+					// pi's editor is the model here: two thin rules carry the
+					// colour and the inside is left alone, which is why it stays
+					// legible and still reads as part of the gradient. Washing a
+					// whole tool block in ramp colour instead produces a solid
+					// slab that drowns both its own text and the effects on top
+					// of it. So the bracketing rows take the colour and the
+					// interior gets only enough to tie it to them.
+					const strength = isBoxEdge ? 0.34 : 0.07;
+					cell.outBg = mixRgb(effectiveBg(cell, this.bg), boxCol, strength * blend);
 					row.dirty = true;
 				}
 
@@ -351,7 +419,18 @@ export class RainbowEngine {
 					// Inside a box pi has already colour-coded the text (command
 					// vs output vs timing). Overriding that at full strength
 					// throws away information, so the ramp only leans on it.
-					const amount = isRule ? 1 : inBox ? blend * 0.45 : dimmed ? blend * 0.4 : blend;
+					// Box edges are chrome and carry the ramp like a rule does;
+					// text sitting inside a block keeps most of pi's own
+					// colour-coding of command, output and timing.
+					const amount = isRule
+						? 1
+						: isBoxEdge
+							? blend * 0.9
+							: inBox
+								? blend * 0.3
+								: dimmed
+									? blend * 0.4
+									: blend;
 					cell.outFg = mixRgb(cell.fg ?? this.fg, col, amount);
 					if (isRule) cell.outBold = true;
 					row.dirty = true;

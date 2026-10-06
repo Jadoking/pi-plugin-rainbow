@@ -23,6 +23,12 @@ export type RainbowSettings = {
 	/* gradient field */
 	/** How much of the screen the rainbow is allowed to touch. */
 	scope: RainbowScope;
+	/**
+	 * Minimum WCAG contrast ratio between coloured text and whatever it sits
+	 * on. 1 disables the floor entirely; around 3 keeps body text comfortable
+	 * without flattening the palette.
+	 */
+	minContrast: number;
 	mode: GradientMode;
 	motion: MotionMode;
 	/** Palette cycles per second. */
@@ -99,6 +105,7 @@ export const DEFAULT_SETTINGS: RainbowSettings = {
 	presetCycle: 0,
 
 	scope: "panels",
+	minContrast: 3.2,
 	mode: "diagonal",
 	motion: "scroll",
 	speed: 0.12,
@@ -190,6 +197,7 @@ export function normalizeSettings(value: Partial<RainbowSettings> | undefined): 
 		angle: clamp(num(value?.angle, d.angle), 0, 1),
 
 		blend: clamp(num(value?.blend, d.blend), 0, 1),
+		minContrast: clamp(num(value?.minContrast, d.minContrast), 1, 21),
 		vibrance: clamp(num(value?.vibrance, d.vibrance), 0, 2),
 		brightness: clamp(num(value?.brightness, d.brightness), -0.5, 0.5),
 		colorText: bool(value?.colorText, d.colorText),
