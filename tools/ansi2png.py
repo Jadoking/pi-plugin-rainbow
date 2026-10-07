@@ -261,11 +261,18 @@ def main():
     ap.add_argument("output")
     ap.add_argument("--size", type=int, default=16)
     ap.add_argument("--title", default=None)
+    # render() has always supported these; not exposing them meant callers
+    # silently got the default or, worse, failed on an argument that looked
+    # like it should work.
+    ap.add_argument("--radius", type=int, default=10,
+                    help="corner radius; 0 for square corners (video frames)")
+    ap.add_argument("--pad", type=int, default=18)
     args = ap.parse_args()
 
     data = sys.stdin.read() if args.input == "-" else open(args.input, encoding="utf-8").read()
     lines = data.rstrip("\n").split("\n")
-    path, w, h = render(lines, args.output, font_size=args.size, title=args.title)
+    path, w, h = render(lines, args.output, font_size=args.size, title=args.title,
+                        radius=args.radius, pad=args.pad)
     print(f"{path} {w}x{h}")
 
 
