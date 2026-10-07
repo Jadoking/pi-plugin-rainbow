@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "/tmp/rbbench",
+    "rootDir": "./extensions/rainbow",
+    "declaration": false,
+    "sourceMap": false,
+    "types": []
+  },
+  "include": ["extensions/rainbow/**/*.ts"]
+}

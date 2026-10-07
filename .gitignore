@@ -1,3 +1,9 @@
 node_modules/
 .build/
 node_modules/
+
+# tsc emits beside the sources when a build config lacks an outDir, and pi
+# loads this directory through jiti -- a stale .js there can shadow its .ts.
+extensions/**/*.js
+__pycache__/
+*.pyc

@@ -41,8 +41,27 @@ export function toHex(c: RGB): string {
  * Björn Ottosson's transform. Operates on linear-light sRGB.
  * ------------------------------------------------------------------ */
 
+/**
+ * sRGB -> linear for 8-bit channels, precomputed.
+ *
+ * Every colour in the pipeline passes through clamp255, which rounds, so
+ * channels are always integers in [0,255] and a 256-entry table is exact
+ * rather than an approximation. This matters because it is on the hot path:
+ * each OKLab conversion calls it three times, and the engine does several
+ * conversions per cell per frame, so the pow() it replaces was being evaluated
+ * tens of thousands of times a second.
+ */
+const SRGB_LINEAR = new Float64Array(256);
+for (let i = 0; i < 256; i++) {
+	const v = i / 255;
+	SRGB_LINEAR[i] = v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
 const srgbToLinear = (c: number): number => {
-	const v = c / 255;
+	// Integer fast path, which is every caller in practice.
+	const i = c | 0;
+	if (i === c && i >= 0 && i < 256) return SRGB_LINEAR[i]!;
+	const v = (c < 0 ? 0 : c > 255 ? 255 : c) / 255;
 	return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 };
 
@@ -83,6 +102,59 @@ export function oklabToRgb(c: OKLab): RGB {
 		g: linearToSrgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
 		b: linearToSrgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
 	};
+}
+
+/**
+ * Largest chroma that is actually displayable at this lightness and hue.
+ *
+ * sRGB holds much less chroma near black and near white than it does in the
+ * middle, so moving a colour's lightness without touching its chroma will
+ * often ask for a colour that does not exist. oklabToRgb then clips each
+ * channel independently, and clipping channels at different amounts rotates
+ * the hue -- which is exactly what a hue-preserving transform must not do.
+ *
+ * Binary search is used rather than an analytic boundary because the sRGB
+ * gamut boundary in OKLab has no closed form, and twelve steps resolves chroma
+ * far finer than 8-bit output can show.
+ */
+function maxChroma(L: number, h: number): number {
+	const inGamut = (C: number): boolean => {
+		const a = Math.cos(h * Math.PI * 2) * C;
+		const b = Math.sin(h * Math.PI * 2) * C;
+		const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+		const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+		const s_ = L - 0.0894841775 * a - 1.291485548 * b;
+		const l = l_ * l_ * l_;
+		const m = m_ * m_ * m_;
+		const s = s_ * s_ * s_;
+		const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+		const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+		const bl = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
+		const eps = 1e-6;
+		return (
+			r >= -eps && r <= 1 + eps && g >= -eps && g <= 1 + eps && bl >= -eps && bl <= 1 + eps
+		);
+	};
+
+	if (inGamut(0.4)) {
+		let lo = 0.4;
+		let hi = 0.5;
+		while (hi < 0.45 && inGamut(hi)) hi += 0.05;
+		for (let i = 0; i < 10; i++) {
+			const mid = (lo + hi) / 2;
+			if (inGamut(mid)) lo = mid;
+			else hi = mid;
+		}
+		return lo;
+	}
+	let lo = 0;
+	let hi = 0.4;
+	for (let i = 0; i < 12; i++) {
+		const mid = (lo + hi) / 2;
+		if (inGamut(mid)) lo = mid;
+		else hi = mid;
+	}
+	return lo;
 }
 
 export type OKLCH = { L: number; C: number; h: number };
@@ -295,12 +367,27 @@ export function nearestFrom(c: RGB, palette: RGB[]): RGB {
 // ---------------------------------------------------------------- contrast
 
 /** WCAG relative luminance. */
+/**
+ * WCAG uses 0.03928 where the sRGB spec uses 0.04045, so this keeps its own
+ * table rather than borrowing SRGB_LINEAR. The two differ only inside a range
+ * where both branches nearly agree, but a contrast floor is a correctness
+ * guarantee and is not worth making approximate to save 2KB.
+ */
+const WCAG_LINEAR = new Float64Array(256);
+for (let i = 0; i < 256; i++) {
+	const s = i / 255;
+	WCAG_LINEAR[i] = s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+}
+
 export function relativeLuminance(c: RGB): number {
-	const ch = (v: number) => {
-		const s = v / 255;
-		return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-	};
-	return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+	const r = c.r | 0;
+	const g = c.g | 0;
+	const b = c.b | 0;
+	return (
+		0.2126 * WCAG_LINEAR[r < 0 ? 0 : r > 255 ? 255 : r]! +
+		0.7152 * WCAG_LINEAR[g < 0 ? 0 : g > 255 ? 255 : g]! +
+		0.0722 * WCAG_LINEAR[b < 0 ? 0 : b > 255 ? 255 : b]!
+	);
 }
 
 /** WCAG contrast ratio, 1 (identical) to 21 (black on white). */
@@ -324,9 +411,41 @@ export function contrastRatio(a: RGB, b: RGB): number {
  * Returns the input unchanged when it already clears `min`, so cells that are
  * fine cost one luminance calculation and nothing else.
  */
+/**
+ * Memo for the search below, keyed on the (fg, bg) pair packed into one safe
+ * integer. A frame has thousands of cells but only a handful of distinct
+ * colour pairs -- a block is one colour per row, body text is a few theme
+ * colours -- so the search runs a few times per frame instead of per cell.
+ *
+ * Only solved results are stored. Cells that already pass return the caller's
+ * own object, because the engine detects "did this change" by reference and
+ * handing back an equal-but-different object would mark every cell dirty.
+ */
+const contrastCache = new Map<number, RGB>();
+let contrastCacheMin = Number.NaN;
+
 export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
 	if (min <= 1 || contrastRatio(fg, bg) >= min) return fg;
 
+	if (min !== contrastCacheMin) {
+		contrastCache.clear();
+		contrastCacheMin = min;
+	}
+	const key =
+		(((fg.r | 0) << 16) | ((fg.g | 0) << 8) | (fg.b | 0)) * 0x1000000 +
+		((((bg.r | 0) << 16) | ((bg.g | 0) << 8) | (bg.b | 0)) >>> 0);
+	const cached = contrastCache.get(key);
+	if (cached) return cached;
+
+	const solved = solveContrast(fg, bg, min);
+	// A screen cannot hold more distinct pairs than this; the bound only exists
+	// so a long session with many palette changes cannot grow it without end.
+	if (contrastCache.size >= 4096) contrastCache.clear();
+	contrastCache.set(key, solved);
+	return solved;
+}
+
+function solveContrast(fg: RGB, bg: RGB, min: number): RGB {
 	const { L, C, h } = rgbToOklch(fg);
 	// Move away from the background: lighten on dark, darken on light.
 	const up = relativeLuminance(bg) < 0.18;
@@ -335,7 +454,8 @@ export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
 	// finer than 8-bit output, and costs a bounded amount per cell.
 	let lo = up ? L : 0;
 	let hi = up ? 1 : L;
-	let best = oklchToRgb({ L: up ? 1 : 0, C, h });
+	const extremeL = up ? 1 : 0;
+	let best = oklchToRgb({ L: extremeL, C: Math.min(C, maxChroma(extremeL, h)), h });
 
 	if (contrastRatio(best, bg) < min) {
 		// Even pure white/black cannot clear the bar against this background;
@@ -345,7 +465,10 @@ export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
 
 	for (let i = 0; i < 16; i++) {
 		const mid = (lo + hi) / 2;
-		const candidate = oklchToRgb({ L: mid, C, h });
+		// Chroma has to give way to lightness here. Asking for the original
+		// chroma at a new lightness usually lands outside sRGB, and the clip
+		// that follows is what rotates the hue.
+		const candidate = oklchToRgb({ L: mid, C: Math.min(C, maxChroma(mid, h)), h });
 		if (contrastRatio(candidate, bg) >= min) {
 			best = candidate;
 			if (up) hi = mid;
@@ -371,5 +494,6 @@ export function ensureContrast(fg: RGB, bg: RGB, min: number): RGB {
  */
 export function bandLightness(c: RGB, lo: number, hi: number): RGB {
 	const { L, C, h } = rgbToOklch(c);
-	return oklchToRgb({ L: lo + clamp01(L) * (hi - lo), C, h });
+	const L2 = lo + clamp01(L) * (hi - lo);
+	return oklchToRgb({ L: L2, C: Math.min(C, maxChroma(L2, h)), h });
 }
