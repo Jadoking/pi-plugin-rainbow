@@ -98,7 +98,7 @@ export function draw(
 	return true;
 }
 
-/** Paint into a cell only if it is empty (no text, no background). */
+/** Paint into whitespace without replacing text or box borders. */
 export function drawIfBlank(
 	row: FrameRow,
 	cell: FrameCell | undefined,

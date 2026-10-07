@@ -39,8 +39,10 @@ export type RainbowSettings = {
 	angle: number;
 
 	/* how colour is applied */
-	/** 0 = keep original colours, 1 = fully replaced by the palette. */
+	/** Text blend; also controls background tint outside boxes. */
 	blend: number;
+	/** Box background strength: 0 = original fill, 1 = palette colour. */
+	boxBlend: number;
 	/** Extra chroma on the palette, 0..2. */
 	vibrance: number;
 	/** Lightness bias, -0.5..0.5. */
@@ -113,6 +115,7 @@ export const DEFAULT_SETTINGS: RainbowSettings = {
 	angle: 0,
 
 	blend: 0.85,
+	boxBlend: 0.15,
 	vibrance: 1,
 	brightness: 0,
 	colorText: true,
@@ -197,6 +200,7 @@ export function normalizeSettings(value: Partial<RainbowSettings> | undefined): 
 		angle: clamp(num(value?.angle, d.angle), 0, 1),
 
 		blend: clamp(num(value?.blend, d.blend), 0, 1),
+		boxBlend: clamp(num(value?.boxBlend, d.boxBlend), 0, 1),
 		minContrast: clamp(num(value?.minContrast, d.minContrast), 1, 21),
 		vibrance: clamp(num(value?.vibrance, d.vibrance), 0, 2),
 		brightness: clamp(num(value?.brightness, d.brightness), -0.5, 0.5),

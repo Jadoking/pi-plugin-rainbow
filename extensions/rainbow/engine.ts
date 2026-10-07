@@ -22,7 +22,7 @@ import { buildFrame, effectiveBg, emitFrame, type Frame } from "./frame.js";
 import { allFx, type FxContext, type FxEvent, type FxLayer, type FxTuning, makeRng } from "./fx.js";
 import "./fx-particles.js";
 import "./fx-post.js";
-import { applyScope, isChromeGlyph, type Layout, type RainbowScope } from "./layout.js";
+import { applyScope, boxBounds, isBoxCell, isChromeGlyph, type Layout, type RainbowScope } from "./layout.js";
 import { presetIds, rampFor } from "./presets.js";
 import type { RainbowSettings } from "./settings.js";
 
@@ -69,7 +69,8 @@ const DECOR_GLYPHS = new Set(
 export class RainbowEngine {
 	private settings: RainbowSettings;
 	private readonly t0 = Date.now();
-	private lastFrameAt = 0;
+	private lastFrameAt: number | null = null;
+	private gradientPhase = 0;
 	private store = new Map<string, unknown>();
 	private events: FxEvent[] = [];
 	private rng = makeRng(0x1f2e3d4c);
@@ -124,6 +125,12 @@ export class RainbowEngine {
 		this.rampFrom = this.currentRamp();
 		this.rampTo = target;
 		this.fadeStart = this.now;
+	}
+
+	/** A static renderer has no later frame to finish a palette crossfade. */
+	settlePalette(): void {
+		this.rampFrom = this.rampTo;
+		this.fadeStart = -1;
 	}
 
 	private currentRamp(): Ramp {
@@ -192,7 +199,8 @@ export class RainbowEngine {
 
 		const started = performance.now();
 		const now = this.now;
-		const dt = this.lastFrameAt === 0 ? 1 / 60 : Math.min(0.2, Math.max(0.001, now - this.lastFrameAt));
+		const elapsed = this.lastFrameAt === null ? 0 : Math.max(0, now - this.lastFrameAt);
+		const dt = this.lastFrameAt === null ? 1 / 60 : Math.min(0.2, elapsed);
 		this.lastFrameAt = now;
 		this.frameNo++;
 
@@ -216,6 +224,8 @@ export class RainbowEngine {
 		const calm = overlayVisible && s.calmOnOverlay;
 
 		const speed = s.speed * (s.reactive ? 1 + this.energy * 1.2 : 1) * (s.reducedMotion ? 0.35 : 1);
+		// Integrate speed per frame; changing it must not rescale the session's age.
+		this.gradientPhase += elapsed * speed;
 		const field: FieldState = makeFieldState({
 			mode: s.mode,
 			motion: s.reducedMotion && s.motion === "jitter" ? "scroll" : s.motion,
@@ -224,6 +234,7 @@ export class RainbowEngine {
 			time: now,
 			turns: s.turns,
 			speed,
+			phase: this.gradientPhase,
 			angle: s.angle,
 			seed: 1337,
 		});
@@ -248,10 +259,20 @@ export class RainbowEngine {
 		// 1. Base gradient colouring.
 		this.colorize(frame, field, ramp, calm ? 0.45 : 1, layout, s.scope);
 
-		// 2. Effect layers.
+		// 2. Effect layers. In panels scope, prose gets only foreground colour;
+		// particles and post-effects must not paint the space around it.
 		{
+			const effectsFrame = s.scope === "panels"
+				? { ...frame, rows: frame.rows.map((row, y) => {
+					if (!layout.rowBox[y]) return layout.rowRule[y] ? row : { ...row, skip: true };
+					const bounds = boxBounds(row);
+					const included = (col: number) => isBoxCell(row, col, bounds);
+					return { ...row, cells: row.cells.filter((cell) => included(cell.col)),
+						byCol: row.byCol.map((cell, col) => included(col) ? cell : undefined) };
+				}) }
+				: frame;
 			const ctx: FxContext = {
-				frame,
+				frame: effectsFrame,
 				width,
 				height: frame.rows.length,
 				time: now,
@@ -270,6 +291,9 @@ export class RainbowEngine {
 				} catch {
 					// A broken effect must never take the terminal down with it.
 				}
+			}
+			for (let y = 0; y < frame.rows.length; y++) {
+				if (effectsFrame.rows[y]!.dirty) frame.rows[y]!.dirty = true;
 			}
 		}
 
@@ -356,37 +380,27 @@ export class RainbowEngine {
 	): void {
 		const s = this.settings;
 		const blend = clamp01(s.blend * scale);
-		if (blend <= 0 || (!s.colorText && !s.colorBackground)) return;
+		const boxBlend = clamp01(s.boxBlend * scale);
+		if ((blend <= 0 && boxBlend <= 0) || (!s.colorText && !s.colorBackground)) return;
 
 		const vib = s.vibrance;
 		const bright = s.brightness;
 		// Backgrounds are a scope decision, not just a setting: `text` mode is
 		// defined by never painting one, and `chrome` only ever hits glyphs.
-		const paintBg = s.colorBackground && scope !== "text" && scope !== "chrome";
+		const allowBg = s.colorBackground && scope !== "text" && scope !== "chrome";
 
 		for (let y = 0; y < frame.rows.length; y++) {
 			const row = frame.rows[y]!;
 			if (row.skip) continue;
 			const isRule = layout.rowRule[y] === true;
-			const inBox = layout.rowBox[y] === true;
-			const isBoxEdge = layout.rowBoxEdge[y] === true;
+			const bounds = boxBounds(row);
 
 			const cells = row.cells;
-			// A box or a footer strip is a UI element, not a canvas. Sampling
-			// the field per cell works on open screen, but inside a filled block
-			// a turbulent field becomes a mosaic that buries the text. One
-			// colour per row keeps the element coherent while still letting the
-			// gradient travel down it.
-			const coherent = inBox || row.quiet;
-			let boxCol: RGB | null = null;
-			if (coherent) {
-				const mid = cells.length > 0 ? cells[cells.length >> 1]!.col : 0;
-				boxCol = sampleRamp(ramp, fieldPhase(field, mid, y));
-				if (vib !== 1) boxCol = saturate(boxCol, vib);
-				if (bright !== 0) boxCol = shade(boxCol, bright);
-			}
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i]!;
+				const inBox = layout.rowBox[y] === true && isBoxCell(row, cell.col, bounds);
+				const backgroundBlend = inBox ? boxBlend : 0.17 * blend;
+				const paintBg = allowBg && backgroundBlend > 0 && (scope !== "panels" || inBox);
 				if (cell.style.inverse) continue;
 				// `chrome` is a per-cell scope, not a per-row one: a rule with a
 				// label in it should colour the rule and leave the label alone.
@@ -405,43 +419,28 @@ export class RainbowEngine {
 					// cell, so tinting the rest turns a hairline into a solid
 					// band and the gradient reads as a smear instead of a line.
 					// The glyph already carries the ramp undiluted; let it.
-					cell.outBg = mixRgb(this.bg, boxCol ?? col, 0.17 * blend);
+					cell.outBg = mixRgb(this.bg, col, backgroundBlend);
 					row.dirty = true;
-				} else if (paintBg && inBox && boxCol) {
-					// Frame the block, do not flood it.
-					//
-					// pi's editor is the model here: two thin rules carry the
-					// colour and the inside is left alone, which is why it stays
-					// legible and still reads as part of the gradient. Washing a
-					// whole tool block in ramp colour instead produces a solid
-					// slab that drowns both its own text and the effects on top
-					// of it. So the bracketing rows take the colour and the
-					// interior gets only enough to tie it to them.
-					const strength = isBoxEdge ? 0.34 : 0.07;
-					cell.outBg = mixRgb(effectiveBg(cell, this.bg), boxCol, strength * blend);
+				} else if (paintBg && inBox && !isRule) {
+					cell.outBg = mixRgb(effectiveBg(cell, this.bg), col, backgroundBlend);
 					row.dirty = true;
 				}
 
 				// Foreground: only cells that actually have ink.
-				if (s.colorText && !cell.blank) {
+				if (s.colorText && blend > 0 && !cell.blank) {
 					const dimmed = s.preserveDim && cell.style.dim;
 					// Separator rules are the clearest gradient carrier on the
 					// screen, so give them the palette undiluted.
 					// Inside a box pi has already colour-coded the text (command
 					// vs output vs timing). Overriding that at full strength
 					// throws away information, so the ramp only leans on it.
-					// Box edges are chrome and carry the ramp like a rule does;
-					// text sitting inside a block keeps most of pi's own
-					// colour-coding of command, output and timing.
 					const amount = isRule
 						? 1
-						: isBoxEdge
-							? blend * 0.9
-							: inBox
-								? blend * 0.3
-								: dimmed
-									? blend * 0.4
-									: blend;
+						: inBox
+							? blend * 0.3
+							: dimmed
+								? blend * 0.4
+								: blend;
 					cell.outFg = mixRgb(cell.fg ?? this.fg, col, amount);
 					if (isRule) {
 						// Keep the line drawn along its whole length. Without

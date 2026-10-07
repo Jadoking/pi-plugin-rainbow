@@ -49,6 +49,16 @@ export class RainbowTuiHook {
 	private timer: NodeJS.Timeout | null = null;
 	private currentFps = 0;
 	private disposed = false;
+	private restore: (() => void) | null = null;
+	private unsubscribeTheme: (() => void) | null = null;
+	private suspended = false;
+
+	/** Let an independently rendered preview own its colours while open. */
+	setSuspended(suspended: boolean): void {
+		this.suspended = suspended;
+		this.restartPump();
+		this.refresh();
+	}
 
 	constructor(opts: HookOptions) {
 		this.opts = opts;
@@ -74,10 +84,16 @@ export class RainbowTuiHook {
 		if (this.disposed) return;
 		const t = tui as Patched;
 		if (!t || typeof t.applyLineResets !== "function") return;
-		if (t.__rainbowPatched) {
-			this.tui = t;
+		if (this.tui === t) {
 			this.restartPump();
 			return;
+		}
+		this.detach();
+		// Reload may reuse the TUI before disposing the old widget. Its
+		// wrappers close over the old engine: adopt the render path, not its flag.
+		if (t.__rainbowPatched) {
+			if (!t.__rainbowRestore) return;
+			t.__rainbowRestore();
 		}
 
 		const originalApply = t.applyLineResets.bind(t);
@@ -111,7 +127,14 @@ export class RainbowTuiHook {
 		}
 
 		t.__rainbowPatched = true;
-		t.__rainbowRestore = () => {
+		const restore = () => {
+			if (t.__rainbowRestore !== restore) return;
+			this.stopPump();
+			this.unsubscribeTheme?.();
+			this.unsubscribeTheme = null;
+			this.tui = null;
+			this.restore = null;
+			this.cursor = null;
 			t.applyLineResets = originalApply;
 			if (originalDoRender) t.doRender = originalDoRender;
 			if (originalExtract) t.extractCursorPosition = originalExtract;
@@ -119,6 +142,8 @@ export class RainbowTuiHook {
 			t.__rainbowRestore = undefined;
 		};
 
+		t.__rainbowRestore = restore;
+		this.restore = restore;
 		this.tui = t;
 		this.subscribeTheme(t);
 		this.restartPump();
@@ -126,9 +151,9 @@ export class RainbowTuiHook {
 
 	detach(): void {
 		this.stopPump();
-		const t = this.tui;
+		this.restore?.();
+		this.restore = null;
 		this.tui = null;
-		t?.__rainbowRestore?.();
 	}
 
 	dispose(): void {
@@ -138,6 +163,9 @@ export class RainbowTuiHook {
 
 	/** Force an immediate repaint (after a settings change, say). */
 	refresh(): void {
+		// With no pump, a crossfade's first (old-palette) frame would remain
+		// indefinitely. Static, suppressed and preview-suspended views snap.
+		if (this.currentFps === 0) this.opts.engine.settlePalette();
 		this.tui?.requestRender?.(true);
 	}
 
@@ -145,7 +173,7 @@ export class RainbowTuiHook {
 
 	private transform(lines: string[]): string[] {
 		const tui = this.tui;
-		if (!tui) return lines;
+		if (!tui || this.suspended) return lines;
 		const s = this.opts.getSettings();
 		if (!s.enabled) return lines;
 
@@ -155,8 +183,8 @@ export class RainbowTuiHook {
 		const width = Math.max(1, tui.terminal?.columns ?? 80);
 		const height = Math.max(1, tui.terminal?.rows ?? lines.length);
 
-		// In the main-screen renderer `lines` is only the newly appended block,
-		// not a whole screen; never pad those or the scrollback grows sideways.
+		// Main-screen lines are the complete rendered document (before diff),
+		// not a fixed-size viewport; never pad them to terminal dimensions.
 		const padFullWidth = fullscreen && s.fullBleed;
 
 		const started = performance.now();
@@ -173,12 +201,12 @@ export class RainbowTuiHook {
 
 	private subscribeTheme(tui: Patched): void {
 		try {
-			tui.onTerminalColorSchemeChange?.((scheme) => {
+			this.unsubscribeTheme = tui.onTerminalColorSchemeChange?.((scheme) => {
 				const s = scheme as { background?: string; foreground?: string } | undefined;
 				const bg = s?.background ? safeHex(s.background) : null;
 				const fg = s?.foreground ? safeHex(s.foreground) : null;
 				this.opts.engine.setTheme(bg, fg);
-			});
+			}) ?? null;
 		} catch {
 			// Terminal does not support colour queries — the defaults are fine.
 		}
@@ -190,7 +218,7 @@ export class RainbowTuiHook {
 
 	private targetFps(): number {
 		const s = this.opts.getSettings();
-		if (!s.enabled) return 0;
+		if (!s.enabled || this.suspended) return 0;
 		if (isRainbowAnimationDisabled({ animateInTmux: s.animateInTmux })) return 0;
 		if (s.speed <= 0 && Object.keys(s.fx).length === 0) return 0;
 

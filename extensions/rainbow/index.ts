@@ -160,7 +160,13 @@ export default function rainbowPlugin(pi: ExtensionAPI) {
 				c.ui.notify("Rainbow settings need interactive mode", "error");
 				return;
 			}
-			await showRainbowSettingsDialog(ctx, settings, (next) => apply(c, next));
+			hook.setSuspended(true);
+			try {
+				await showRainbowSettingsDialog(ctx, settings, (next) => apply(c, next));
+			} finally {
+				hook.setSuspended(false);
+				setStatus(c);
+			}
 		},
 	});
 

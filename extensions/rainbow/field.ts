@@ -117,6 +117,8 @@ export type FieldParams = {
 	turns: number;
 	/** Cycles per second. */
 	speed: number;
+	/** Accumulated cycles when speed varies; omitted for constant-speed callers. */
+	phase?: number;
 	/** Static rotation of the gradient, in turns. */
 	angle: number;
 	/** Deterministic per-session seed. */
@@ -144,29 +146,29 @@ export type FieldState = {
 
 /** Precompute everything that does not vary per cell. One call per frame. */
 export function makeFieldState(p: FieldParams): FieldState {
-	const s = p.speed;
+	const phase = p.phase ?? p.time * p.speed;
 	let t: number;
 	switch (p.motion) {
 		case "scroll":
-			t = p.time * s;
+			t = phase;
 			break;
 		case "pulse":
-			t = Math.sin(p.time * s * Math.PI * 2) * 0.5;
+			t = Math.sin(phase * Math.PI * 2) * 0.5;
 			break;
 		case "wave":
-			t = p.time * s;
+			t = phase;
 			break;
 		case "orbit":
-			t = p.time * s * 0.5;
+			t = phase * 0.5;
 			break;
 		case "jitter":
-			t = p.time * s + (hash1(Math.floor(p.time * 24), p.seed) - 0.5) * 0.08;
+			t = phase + (hash1(Math.floor(p.time * 24), p.seed) - 0.5) * 0.08;
 			break;
 		case "breathe":
-			t = (1 - Math.cos(p.time * s * Math.PI)) * 0.25;
+			t = (1 - Math.cos(phase * Math.PI)) * 0.25;
 			break;
 		case "drift":
-			t = p.time * s * 0.61803 + Math.sin(p.time * s * 0.37) * 0.3;
+			t = phase * 0.61803 + Math.sin(phase * 0.37) * 0.3;
 			break;
 		default:
 			t = 0;
@@ -176,8 +178,8 @@ export function makeFieldState(p: FieldParams): FieldState {
 	let ox = 0.5;
 	let oy = 0.5;
 	if (p.motion === "orbit") {
-		ox = 0.5 + Math.cos(p.time * s * 1.3) * 0.33;
-		oy = 0.5 + Math.sin(p.time * s * 0.9) * 0.33;
+		ox = 0.5 + Math.cos(phase * 1.3) * 0.33;
+		oy = 0.5 + Math.sin(phase * 0.9) * 0.33;
 	}
 
 	const a = p.angle * Math.PI * 2;

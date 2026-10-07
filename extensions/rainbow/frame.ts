@@ -18,7 +18,7 @@ import { clamp255, type RGB } from "./color.js";
 export type FrameCell = AnsiCell & {
 	/** Starting column of this cell (wide glyphs occupy `width` columns). */
 	col: number;
-	/** True when the glyph is whitespace and there is no background colour. */
+	/** True when the glyph is whitespace, including inside a filled box. */
 	blank: boolean;
 	/** Mutable output overrides. `null` means "no colour", `undefined` means "unset". */
 	outText: string;
@@ -73,7 +73,7 @@ export function isPassThroughLine(line: string): boolean {
 const SPACE_RE = /^[\s\u00a0]*$/;
 
 function makeCell(src: AnsiCell, col: number): FrameCell {
-	const blank = src.bgCode === null && SPACE_RE.test(src.text);
+	const blank = SPACE_RE.test(src.text);
 	return Object.assign(src, {
 		col,
 		blank,

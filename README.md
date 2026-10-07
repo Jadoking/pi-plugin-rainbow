@@ -97,7 +97,8 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 
 ## Commands
 
-- `/rainbow-settings`: tune the active palette live
+- `/rainbow-settings`: tune the palette and effects with an animated box preview. Use ↑↓ to select, ←→ to adjust intensity, and Space to toggle an effect.
+- `/rainbow-fx <id> [0..1]`: toggle or set an effect; `list` shows effects and `none` disables them.
 - `/rainbow-reset`: restore defaults
 - `/rainbow-preset [list|next|prev|name]`: browse or switch presets
 - `/rainbow-splash`: show the centered splash overlay
@@ -107,8 +108,9 @@ Once published to npm or a git remote, it can be installed with Pi's package flo
 - This package targets interactive Pi CLI, not Ralph's non-interactive `pi --print --mode json` adapter path.
 - Assistant output is patched at the component level, not via a whole-screen framebuffer hook.
 - Styled markdown spans such as code blocks, links, and syntax-highlighted regions are intentionally preserved instead of being recolored blindly.
-- Tool execution boxes are left at Pi defaults (no custom tool-box recoloring or animation overrides).
-- Animation is intentionally scoped to assistant text and the editor prompt entry area; tool boxes and other non-text UI regions keep Pi defaults.
+- In `panels` scope, effects reach filled tool boxes and outlined side boxes. Adjacent prose receives foreground color only; editor contents and the footer stay untouched.
+- In `/rainbow-settings`, **box strength** controls box backgrounds independently of text blend. 0% keeps the original fill; 100% uses the palette colour. Brightness, vibrance, and effects still apply; disable effects for an unmodified palette. Text contrast is corrected automatically. The default is a subtle 15% tint.
+- The settings preview uses the same effect engine as the session. The outer screen effect pauses while settings are open so the preview is not processed twice.
 - The final-frame postprocess renderer is enabled by default. You can temporarily opt out with `PI_RAINBOW_POSTPROCESS_RAINBOW=0`.
 - When Pi runs inside tmux, the plugin uses a tmux-friendlier rendering path with much lower ANSI churn. Live animation is still reduced to static by default to avoid multiplexer redraw jitter, but you can re-enable motion with the `Animate in tmux` setting or `PI_RAINBOW_FORCE_ANIMATION=1`.
 - For distributed installs, Pi core packages are intentionally listed as peers so the plugin patches the host runtime instead of a private duplicate copy.

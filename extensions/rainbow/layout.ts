@@ -21,13 +21,6 @@ const EDGE_CHARS = new Set(["│", "┃", "║", "▏", "▎", "▌", "┆", "�
 
 const CORNER_CHARS = new Set(["╭", "╮", "╰", "╯", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"]);
 
-/**
- * Particles need vertical room. Below this many rows a panel only takes the
- * gradient, because rain, snow or a grid floor squeezed into one or two lines
- * reads as corrupted output rather than as an effect.
- */
-const MIN_PARTICLE_HEIGHT = 4;
-
 /** True when a glyph is part of a box/separator rather than content. */
 export function isChromeGlyph(ch: string): boolean {
 	return RULE_CHARS.has(ch) || EDGE_CHARS.has(ch) || CORNER_CHARS.has(ch);
@@ -85,21 +78,26 @@ function isRuleRow(row: FrameRow): boolean {
 	return rule >= (rule + other) * 0.6;
 }
 
-/**
- * True when a row is part of a background-filled block.
- *
- * This is how pi actually draws the thing people call a "box": a tool call, a
- * user message or a diff is a run of rows with a theme background colour set,
- * with no border glyphs anywhere. Detecting it by fill rather than by outline
- * is the only way to find them.
- */
+/** Horizontal extent of an outlined box, including its border cells. */
+export function boxBounds(row: FrameRow): [number, number] | undefined {
+	const edges = row.cells.filter((cell) => EDGE_CHARS.has(cell.text) || CORNER_CHARS.has(cell.text));
+	const first = edges[0];
+	const last = edges.at(-1);
+	return first && last && first !== last ? [first.col, last.col] : undefined;
+}
+
+export function isBoxCell(row: FrameRow, col: number, bounds: [number, number] | undefined): boolean {
+	return row.byCol[col]?.bgCode != null ||
+		Boolean(bounds && col >= bounds[0] && col <= bounds[1]);
+}
+
 function isBoxRow(row: FrameRow): boolean {
 	let filled = 0;
 	for (const cell of row.cells) {
 		if (cell.style.bgCode !== null) filled++;
 	}
 	// A handful of cells is a syntax highlight; a block is wider than that.
-	return filled >= 6;
+	return filled >= 6 || boxBounds(row) !== undefined;
 }
 
 function hasChrome(row: FrameRow, isRule: boolean): boolean {
@@ -204,10 +202,8 @@ export function analyzeLayout(frame: Frame): Layout {
  * How much of the screen the rainbow is allowed to touch.
  *
  * - `screen`  — everything, the old flood-fill behaviour.
- * - `panels`  — pi's chrome only: the separator rules, the small panels around
- *               them (editor, footer), and every background-filled block pi
- *               draws for a tool call or a message. Plain transcript prose keeps
- *               its own colours, so long output stays readable.
+ * - `panels`  — message text, filled boxes and separator rules. Empty screen
+ *               space, editor contents and the footer keep their own colours.
  * - `chrome`  — the separator rules and box glyphs, nothing else.
  * - `text`    — foregrounds everywhere, no backgrounds at all.
  */
@@ -215,7 +211,7 @@ export type RainbowScope = "screen" | "panels" | "chrome" | "text";
 
 export const SCOPES: { id: RainbowScope; blurb: string }[] = [
 	{ id: "screen", blurb: "colour the entire screen, background included" },
-	{ id: "panels", blurb: "pi's rules, editor and footer — transcript left alone" },
+	{ id: "panels", blurb: "message text, filled boxes and borders only" },
 	{ id: "chrome", blurb: "separator rules and box glyphs only" },
 	{ id: "text", blurb: "text colours everywhere, no backgrounds" },
 ];
@@ -229,6 +225,14 @@ export const SCOPES: { id: RainbowScope; blurb: string }[] = [
  */
 export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 	const layout = analyzeLayout(frame);
+	// The final pair of rules brackets the editor. Preserve its contents in
+	// every scope; only the surrounding lines should carry the gradient.
+	const editorRules = layout.ruleRows.filter((y) => !boxBounds(frame.rows[y]!));
+	const editorTop = editorRules.at(-2);
+	const editorBottom = editorRules.at(-1);
+	if (editorTop !== undefined && editorBottom !== undefined) {
+		for (let y = editorTop + 1; y < editorBottom; y++) frame.rows[y]!.skip = true;
+	}
 	if (scope === "screen") return layout;
 
 	// Everything below the input box belongs to pi, not to the rainbow.
@@ -238,9 +242,7 @@ export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 	// id. That is dense information people read at a glance rather than
 	// decoration, and colouring it only ever makes it harder to parse. The
 	// gradient stops at the input box.
-	const lastRule = layout.ruleRows.length
-		? layout.ruleRows[layout.ruleRows.length - 1]!
-		: -1;
+	const lastRule = editorRules.at(-1) ?? -1;
 	if (lastRule >= 0) {
 		for (let y = lastRule + 1; y < frame.rows.length; y++) {
 			frame.rows[y]!.skip = true;
@@ -258,7 +260,7 @@ export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 			continue;
 		}
 
-		// panels: keep the rules and every non-transcript panel.
+		// panels: keep filled boxes and rules; elsewhere colour only text.
 		if (layout.rowRule[y]) {
 			// A rule is one row tall. Particles landing on it replace the line
 			// with scattered glyphs, which reads as a damaged rule rather than
@@ -269,19 +271,9 @@ export function applyScope(frame: Frame, scope: RainbowScope): Layout {
 		// A background-filled block is a "box" even when it sits in the middle
 		// of the transcript, which is exactly where pi puts tool calls. These
 		// are the blocks worth colouring, so they override panel classification.
-		if (layout.rowBox[y]) {
-			row.quiet = true;
-			continue;
-		}
-		const pi = layout.rowPanel[y] ?? -1;
-		const panel = pi >= 0 ? layout.panels[pi] : undefined;
-		if (!panel || panel.kind === "transcript") {
-			row.skip = true;
-			continue;
-		}
-		// Thin panels — a one-line editor, a two-line footer — still take the
-		// gradient, but particles in a 1-row band look like dropped characters.
-		if (panel.height < MIN_PARTICLE_HEIGHT) row.quiet = true;
+		if (layout.rowBox[y]) continue;
+		row.quiet = true;
+		if (!row.cells.some((cell) => cell.text.trim())) row.skip = true;
 	}
 
 	return layout;
